@@ -1,0 +1,43 @@
+import { test, expect, afterEach } from "bun:test";
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parseWorkflow } from "../src/config";
+import { createRun } from "../src/store";
+import { TmuxRuntime } from "../src/runtime";
+import { cleanEnv, command } from "../src/process";
+
+const cleanup: string[] = [];
+const oldPath = process.env.PATH;
+afterEach(() => { process.env.PATH = oldPath; delete process.env.SFLOW_HOME; for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+test("inherited runtime identity is removed without discarding auth/config", () => {
+  const keys = { TMUX: "existing", TMUX_PANE: "%1", CLAUDECODE: "1", CODEX_THREAD_ID: "parent", SFLOW_TOKEN: "parent", CODEX_HOME: "/config" };
+  const original = Object.fromEntries(Object.keys(keys).map(k => [k, process.env[k]])); Object.assign(process.env, keys);
+  try { const e = cleanEnv(); expect(e.TMUX).toBeUndefined(); expect(e.CODEX_THREAD_ID).toBeUndefined(); expect(e.SFLOW_TOKEN).toBeUndefined(); expect(e.CODEX_HOME).toBe("/config"); }
+  finally { for (const k of Object.keys(keys)) { if (original[k] === undefined) delete process.env[k]; else process.env[k] = original[k]; } }
+});
+test.skipIf(!Bun.which("tmux"))("real tmux sessions forward model safely and isolate per-worker context", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sf-runtime-")); cleanup.push(root);
+  const bin = join(root, "bin"), project = join(root, "project"); mkdirSync(bin); mkdirSync(project);
+  process.env.SFLOW_HOME = join(root, "state"); process.env.PATH = bin + ":" + oldPath;
+  const fake = join(bin, "codex");
+  writeFileSync(fake, '#!/bin/sh\nprintf "%s\\n" "$@" > argv.txt\nwhile :; do sleep 1; done\n'); chmodSync(fake, 0o700);
+  const run = createRun(parseWorkflow({ version: 1, name: "native-test", steps: ["first", "second"].map(id => ({ id, agent: "codex", model: "model;$(touch should-not-exist)", cwd: project, prompt: "test" })) }, root));
+  cleanup.push(join(run.socket, ".."));
+  const rt = new TmuxRuntime(["/bin/true"]);
+  try {
+    for (const step of run.workflow.steps) { run.steps[step.id].status = "launching"; await rt.create(run, step); }
+    await Bun.sleep(100);
+    for (const step of run.workflow.steps) {
+      expect(await rt.exists(run, step.id)).toBe(true);
+      const argv = readFileSync(join(run.dir, step.id, "argv.txt"), "utf8");
+      expect(argv).toContain("model;$(touch should-not-exist)"); expect(argv).not.toContain("dangerously");
+      const wrapper = readFileSync(join(run.dir, step.id, "worker"), "utf8");
+      expect(wrapper).toContain(`SFLOW_STEP_ID='${step.id}'`);
+      expect(wrapper).toContain(run.steps[step.id].token);
+      expect(wrapper).not.toContain(run.steps[step.id === "first" ? "second" : "first"].token);
+      const env = await command(["tmux", "-S", run.socket, "show-environment", "-t", run.steps[step.id].session]);
+      expect(env.stdout).not.toContain("SFLOW_TOKEN");
+    }
+  } finally { for (const step of run.workflow.steps) await rt.stop(run, step.id); }
+});

@@ -1,0 +1,13 @@
+{
+  "name": "session-flow",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "sflow": "src/cli.ts" },
+  "scripts": {
+    "test": "bun test",
+    "check": "tsc --noEmit",
+    "build": "bun build --compile src/cli.ts --outfile dist/sflow"
+  },
+  "devDependencies": { "@types/bun": "latest", "typescript": "^5.9.0" }
+}

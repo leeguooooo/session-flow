@@ -1,0 +1,47 @@
+name: Release binaries
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [darwin-arm64, darwin-x64, linux-x64, linux-arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - run: bun test && bun run check
+      - name: Compile and package
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          mkdir -p release
+          bun build --compile --target="bun-$PLATFORM" src/cli.ts --outfile release/sflow
+          tar -C release -czf "sflow-$PLATFORM.tar.gz" sflow
+          sha256sum "sflow-$PLATFORM.tar.gz" > "sflow-$PLATFORM.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sflow-${{ matrix.platform }}
+          path: sflow-*.tar.gz*
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: release
+      - name: Publish assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --generate-notes
+          gh release upload "$TAG" release/*

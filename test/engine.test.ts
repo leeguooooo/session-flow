@@ -3,11 +3,12 @@ import { mkdtempSync, rmSync, mkdirSync, readFileSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseWorkflow } from "../src/config";
-import { createRun, loadRun, lockRun } from "../src/store";
+import { createRun, loadRun, lockRun, saveRun } from "../src/store";
 import { tick, reconcile } from "../src/engine";
 import type { Message, Run, SessionRuntime, Transport, Step } from "../src/types";
 import { eventProof } from "../src/protocol";
 import { workerTask, workerReport } from "../src/worker";
+import { resolveResult } from "../src/results";
 
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); for (const k of ["SFLOW_HOME", "SFLOW_RUN_ID", "SFLOW_STEP_ID", "SFLOW_TOKEN"]) delete process.env[k]; });
@@ -38,7 +39,7 @@ class FakeRuntime implements SessionRuntime {
   async stop(_r: Run, id: string) { this.live.delete(id); }
 }
 test("parallel children only run after explicit parent completion; outputs feed join", async () => {
-  const run = setup([{ id: "plan" }, { id: "a", dependsOn: ["plan"] }, { id: "b", dependsOn: ["plan"] }, { id: "review", dependsOn: ["a", "b"] }]);
+  const run = setup([{ id: "plan" }, { id: "a", dependsOn: ["plan"] }, { id: "b", agent: "claude", dependsOn: ["plan"] }, { id: "review", dependsOn: ["a", "b"] }]);
   const rt = new FakeRuntime(), tr = new FakeTransport();
   await tick(run, rt, tr); expect(rt.created).toEqual(["plan"]);
   await tick(run, rt, tr); expect(rt.created).toEqual(["plan"]);
@@ -106,6 +107,29 @@ test("worker acceptance and report are idempotent, use proofs without raw capabi
   await expect(workerReport(tr, { status: "done", summary: "different" })).rejects.toThrow("already exists");
   await expect(workerTask(tr)).rejects.toThrow("terminal report");
 });
+test("large terminal report stays in a verified file, not the OCS packet or run snapshot", async () => {
+  const run = setup([{ id: "a" }]); const rt = new FakeRuntime(), tr = new FakeTransport(); await tick(run, rt, tr);
+  process.env.SFLOW_RUN_ID = run.id; process.env.SFLOW_STEP_ID = "a"; process.env.SFLOW_TOKEN = run.steps.a.token;
+  await workerTask(tr); await workerReport(tr, { status: "done", summary: "checked", details: "x".repeat(24000) });
+  expect(Buffer.byteLength(tr.rows[2].body)).toBeLessThan(2000);
+  expect(tr.rows[2].body).not.toContain("x".repeat(100));
+  reconcile(run, tr.rows); expect(run.steps.a.status).toBe("done"); expect(run.steps.a.result!.details).toBeUndefined();
+  expect((resolveResult(run, "a", run.steps.a.result!).details as string).length).toBe(24000);
+});
+test("corrupted result evidence blocks completion and downstream dispatch", async () => {
+  const run = setup([{ id: "a" }, { id: "b", dependsOn: ["a"] }]); const rt = new FakeRuntime(), tr = new FakeTransport(); await tick(run, rt, tr);
+  process.env.SFLOW_RUN_ID = run.id; process.env.SFLOW_STEP_ID = "a"; process.env.SFLOW_TOKEN = run.steps.a.token;
+  await workerTask(tr); await workerReport(tr, { status: "done", summary: "checked" });
+  const e = JSON.parse(tr.rows[2].body); writeFileSync(e.result.fullResultFile, '{"status":"done","summary":"changed"}');
+  await tick(run, rt, tr); expect(run.steps.a.status).toBe("blocked"); expect(run.steps.a.error).toContain("corrupted"); expect(rt.created).toEqual(["a"]);
+});
+test("legacy runs keep inline report semantics when the worker CLI is upgraded", async () => {
+  const run = setup([{ id: "a" }]); run.version = 1; saveRun(run);
+  const rt = new FakeRuntime(), tr = new FakeTransport(); await tick(run, rt, tr);
+  process.env.SFLOW_RUN_ID = run.id; process.env.SFLOW_STEP_ID = "a"; process.env.SFLOW_TOKEN = run.steps.a.token;
+  await workerTask(tr); await workerReport(tr, { status: "done", summary: "legacy", details: { number: 42 } });
+  expect(JSON.parse(tr.rows[2].body).result).toEqual({ status: "done", summary: "legacy", details: { number: 42 } });
+});
 test("damaged completion proof and changed result cannot advance the workflow", async () => {
   const run = setup([{ id: "a" }]); run.steps.a.status = "starting"; const tr = new FakeTransport();
   tr.report(run, "a", "accepted"); reconcile(run, tr.rows);
@@ -114,7 +138,7 @@ test("damaged completion proof and changed result cannot advance the workflow", 
   reconcile(run, tr.rows); expect(String(run.steps.a.status)).toBe("running");
 });
 test("large dependency results become inspectable files within OCS byte limit", async () => {
-  const run = setup([{ id: "a" }, { id: "b" }, { id: "join", dependsOn: ["a", "b"] }]);
+  const run = setup([{ id: "a" }, { id: "b", agent: "claude" }, { id: "join", dependsOn: ["a", "b"] }]);
   const rt = new FakeRuntime(), tr = new FakeTransport(); await tick(run, rt, tr);
   for (const id of ["a", "b"]) {
     tr.report(run, id, "accepted");
@@ -127,6 +151,27 @@ test("large dependency results become inspectable files within OCS byte limit", 
   expect(Buffer.byteLength(row.body)).toBeLessThan(100000);
   const dep = JSON.parse(row.body).dependencies.a;
   expect(JSON.parse(readFileSync(dep.resultFile, "utf8")).details.length).toBe(60000); expect(dep.sha256.length).toBe(64);
+});
+test("matching read-only prefixes wait for first response; different models stay parallel", async () => {
+  const run = setup([{ id: "a" }, { id: "b" }]); const rt = new FakeRuntime(), tr = new FakeTransport();
+  run.workflow.prefixWarmupMs = 5000;
+  await tick(run, rt, tr); expect(rt.created).toEqual(["a"]);
+  tr.report(run, "a", "accepted"); await tick(run, rt, tr); expect(rt.created).toEqual(["a", "b"]);
+  const other = setup([{ id: "c", model: "one" }, { id: "d", model: "two" }]); const rt2 = new FakeRuntime();
+  await tick(other, rt2, new FakeTransport()); expect(rt2.created).toEqual(["c", "d"]);
+});
+test("prefix hold is bounded at 5 seconds, never waits indefinitely for a trust prompt", async () => {
+  const run = setup([{ id: "a" }, { id: "b" }]); const rt = new FakeRuntime(), tr = new FakeTransport();
+  run.workflow.prefixWarmupMs = 5000;
+  await tick(run, rt, tr); run.steps.a.startedAt = Date.now() - 5100;
+  await tick(run, rt, tr); expect(rt.created).toEqual(["a", "b"]);
+});
+test("an accepted native session cannot claim another step through a copied command", async () => {
+  const run = setup([{ id: "a" }, { id: "b" }]); const rt = new FakeRuntime(), tr = new FakeTransport(); await tick(run, rt, tr);
+  process.env.SFLOW_RUN_ID = run.id; process.env.SFLOW_STEP_ID = "a"; process.env.SFLOW_TOKEN = run.steps.a.token; await workerTask(tr);
+  process.env.SFLOW_STEP_ID = "b"; process.env.SFLOW_TOKEN = run.steps.b.token;
+  await expect(workerTask(tr)).rejects.toThrow("already accepted another step");
+  expect(tr.rows.length).toBe(3);
 });
 test("late explicit report after readiness timeout can recover downstream on resume", async () => {
   const run = setup([{ id: "a", readyTimeoutSeconds: 5 }, { id: "b", dependsOn: ["a"] }]);

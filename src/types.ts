@@ -16,6 +16,7 @@ export interface Workflow {
   version: 1;
   name: string;
   concurrency: number;
+  prefixWarmupMs?: number;
   steps: Step[];
 }
 export type StepStatus = "pending" | "dispatching" | "launching" | "starting" | "running" | "done" | "failed" | "blocked" | "uncertain" | "cancelled";
@@ -29,9 +30,15 @@ export interface StepState {
   result?: Record<string, unknown>;
   error?: string;
   uncertainty?: "dispatch" | "launch" | "worker";
+  finishedAt?: number;
+  acceptedAt?: number;
+  prefixGroup?: string;
+  contextBytes?: number;
+  dependencyBytes?: number;
+  fullDependencyBytes?: number;
 }
 export interface Run {
-  version: 1;
+  version: 1 | 2;
   id: string;
   channel: string;
   dir: string;
@@ -49,6 +56,7 @@ export interface TaskEvent {
   prompt: string;
   workspace: string;
   dependencies: Record<string, Record<string, unknown>>;
+  dependencyManifest?: { path: string; sha256: string; count: number };
 }
 export interface WorkerEvent {
   type: "sflow.worker";
@@ -64,6 +72,7 @@ export interface Message {
   seq: number;
   from: string;
   body: string;
+  ts?: string;
 }
 export interface SessionRuntime {
   create(run: Run, step: Step): Promise<void>;

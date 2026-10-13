@@ -21,7 +21,7 @@ test.skipIf(!Bun.which("tmux"))("real tmux sessions forward model safely and iso
   const bin = join(root, "bin"), project = join(root, "project"); mkdirSync(bin); mkdirSync(project);
   process.env.SFLOW_HOME = join(root, "state"); process.env.PATH = bin + ":" + oldPath;
   const fake = join(bin, "codex");
-  writeFileSync(fake, '#!/bin/sh\nprintf "%s\\n" "$@" > argv.txt\nwhile :; do sleep 1; done\n'); chmodSync(fake, 0o700);
+  writeFileSync(fake, '#!/bin/sh\nprintf "%s\\n" "$@" > "argv-$$.txt"\nwhile :; do sleep 1; done\n'); chmodSync(fake, 0o700);
   const run = createRun(parseWorkflow({ version: 1, name: "native-test", steps: ["first", "second"].map(id => ({ id, agent: "codex", model: "model;$(touch should-not-exist)", cwd: project, prompt: "test" })) }, root));
   cleanup.push(join(run.socket, ".."));
   const rt = new TmuxRuntime(["/bin/true"]);
@@ -30,7 +30,8 @@ test.skipIf(!Bun.which("tmux"))("real tmux sessions forward model safely and iso
     await Bun.sleep(100);
     for (const step of run.workflow.steps) {
       expect(await rt.exists(run, step.id)).toBe(true);
-      const argv = readFileSync(join(run.dir, step.id, "argv.txt"), "utf8");
+      const pid = (await command(["tmux", "-S", run.socket, "display-message", "-p", "-t", run.steps[step.id].session, "#{pane_pid}"])).stdout.trim();
+      const argv = readFileSync(join(run.steps[step.id].cwd!, `argv-${pid}.txt`), "utf8");
       expect(argv).toContain("model;$(touch should-not-exist)"); expect(argv).not.toContain("dangerously");
       const wrapper = readFileSync(join(run.dir, step.id, "worker"), "utf8");
       expect(wrapper).toContain(`SFLOW_STEP_ID='${step.id}'`);
@@ -39,5 +40,9 @@ test.skipIf(!Bun.which("tmux"))("real tmux sessions forward model safely and iso
       const env = await command(["tmux", "-S", run.socket, "show-environment", "-t", run.steps[step.id].session]);
       expect(env.stdout).not.toContain("SFLOW_TOKEN");
     }
+    expect(run.steps.first.cwd).toBe(run.steps.second.cwd);
+    const firstPrompt = readFileSync(join(run.dir, "first", "bootstrap.txt"), "utf8");
+    expect(firstPrompt).toContain(join(run.dir, "first", "worker"));
+    expect(firstPrompt).not.toContain(join(run.dir, "second", "worker"));
   } finally { for (const step of run.workflow.steps) await rt.stop(run, step.id); }
 });

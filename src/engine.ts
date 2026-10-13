@@ -1,7 +1,8 @@
 import { saveRun } from "./store";
 import { join } from "node:path";
-import { existsSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { buildTask, prefixGroup } from "./context";
+import { resolveResult } from "./results";
 import { nativeActor, validProof } from "./protocol";
 import type { Run, SessionRuntime, Transport, TaskEvent, Message, WorkerEvent } from "./types";
 
@@ -26,10 +27,16 @@ export function reconcile(run: Run, rows: Message[]) {
     if (e.status === "accepted") {
       if (["done", "failed", "blocked"].includes(state.status) && state.result) continue;
       state.actor = e.actor; state.status = "running"; delete state.error;
+      state.acceptedAt ??= row.ts && Number.isFinite(Date.parse(row.ts)) ? Date.parse(row.ts) : Date.now();
     } else if (["done", "failed", "blocked"].includes(e.status)) {
       if (!state.actor || !e.result || typeof e.result !== "object" || Array.isArray(e.result)) continue;
       if (["done", "failed", "blocked"].includes(state.status) && state.result) continue;
-      state.status = e.status; state.result = e.result; delete state.error;
+      let result: Record<string, unknown>;
+      try { result = resolveResult(run, e.stepId, e.result); } catch {
+        state.status = "blocked"; state.error = "terminal report evidence missing or corrupted; inspect result file/hash"; continue;
+      }
+      state.status = e.status; state.result = e.result.fullResultFile ? e.result : result; delete state.error;
+      state.finishedAt ??= row.ts && Number.isFinite(Date.parse(row.ts)) ? Date.parse(row.ts) : Date.now();
     }
   }
 }
@@ -82,6 +89,10 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
       s.status = "blocked"; s.error = "dependency did not complete successfully"; saveRun(run); continue;
     }
     if (!step.dependsOn.every(id => run.steps[id].status === "done")) continue;
+    const group = prefixGroup(step);
+    // Let the first matching worker begin its response before a sibling is
+    // launched. This only enables compatible caching; it never claims a hit.
+    if (group && Object.values(run.steps).some(other => other.prefixGroup === group && other.status === "starting" && Date.now() - (other.startedAt ?? 0) < (run.workflow.prefixWarmupMs ?? 0))) continue;
     let occupied = Object.values(run.steps).filter(s => active.has(s.status)).length;
     for (const other of run.workflow.steps) {
       if (["blocked", "uncertain", "failed"].includes(run.steps[other.id].status) && await runtime.exists(run, other.id)) occupied++;
@@ -94,17 +105,9 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
     if (assignments.length > 1) { s.status = "uncertain"; s.error = "duplicate assignments found"; saveRun(run); continue; }
     if (!assignments.length) {
       s.status = "dispatching"; saveRun(run);
-      const task: TaskEvent = { type: "sflow.task", version: 1, runId: run.id, stepId: step.id, prompt: step.prompt,
-        workspace: step.worktree ? join(run.dir, step.id, "worktree") : step.cwd,
-        dependencies: Object.fromEntries(step.dependsOn.map(id => [id, run.steps[id].result!])) };
-      if (Buffer.byteLength(JSON.stringify(task)) > 90000) {
-        for (const id of step.dependsOn) {
-          const body = JSON.stringify(run.steps[id].result);
-          const path = join(run.dir, `${id}-result.json`);
-          writeFileSync(path, body + "\n", { mode: 0o600 });
-          task.dependencies[id] = { summary: String(run.steps[id].result?.summary ?? "").slice(0, 128),
-            resultFile: path, sha256: createHash("sha256").update(body + "\n").digest("hex") };
-        }
+      let task: TaskEvent;
+      try { task = buildTask(run, step); } catch (e) {
+        s.status = "blocked"; s.error = `dependency evidence unavailable: ${String(e)}`; saveRun(run); continue;
       }
       if (Buffer.byteLength(JSON.stringify(task)) > 99000) {
         s.status = "failed"; s.error = "assignment exceeds OCS message limit; shorten prompt or dependency fan-in"; saveRun(run); continue;
@@ -112,7 +115,7 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
       try { await transport.send(run.channel, task, sender); }
       catch (e) { s.status = "uncertain"; s.uncertainty = "dispatch"; s.error = String(e); saveRun(run); continue; }
     }
-    s.status = "launching"; s.startedAt = Date.now(); saveRun(run);
+    s.status = "launching"; s.startedAt = Date.now(); s.prefixGroup = group; saveRun(run);
     try { await runtime.create(run, step); s.status = "starting"; }
     catch (e) { s.status = "uncertain"; s.uncertainty = "launch"; s.error = String(e); }
     saveRun(run);

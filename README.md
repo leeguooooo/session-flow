@@ -17,6 +17,7 @@ The installer requires a published GitHub Release. To use the initial source ver
 ```sh
 bun install
 bun run build
+bun run bench:context
 ./dist/sflow help
 ```
 
@@ -29,6 +30,8 @@ sflow validate workflow.json
 sflow run workflow.json
 # The first output prints a runId. In another terminal:
 sflow status <run-id>
+sflow stats <run-id>
+sflow result <run-id> <step-id>
 sflow logs <run-id> <step-id>
 sflow attach <run-id> <step-id>
 ```
@@ -69,6 +72,36 @@ sflow attach <run-id> <step-id>
 `model` is optional: omit it to use that CLI's configured default, or name a model your account supports. Relative `cwd` paths resolve from the workflow file. `dependsOn` creates a DAG; independent ready steps run concurrently. Default policy is `read-only`; writing requires `worktree: true` and a Git repository with an existing commit. Default execution timeout is 1800 seconds, readiness timeout 90 seconds (`timeoutSeconds` / `readyTimeoutSeconds`).
 
 The synthetic [examples/smoke.json](examples/smoke.json) exercises Claude planning, Claude/Codex parallel workers, and a Codex join without modifying project files.
+
+## Less traffic and repeated context
+
+Workers report acceptance and one terminal result through machine-readable OCS
+events with no wake. They do not chat acknowledgements or routine progress back
+and forth. The driver advances dependencies; models do not negotiate scheduling.
+
+Read-only steps share one protocol working directory and tool set within a run;
+approved protocol commands and capabilities remain scoped to each step.
+Optional `prefixWarmupMs` (0 by default, at most 5000) lets matching agent/model
+groups wait for the first worker to accept or for that timeout before launching
+a sibling. Enable it only after measuring whether it helps your workload.
+This makes prefix reuse possible;
+cache hits still depend on the native CLI and provider. Different models are not
+grouped, and write steps retain separate worktrees. Shared Claude workers must be
+addressed by exact session IDs if you message them, since their workspace alias
+is ambiguous.
+
+New runs store complete results in immutable, content-addressed private files. OCS and run snapshots
+carry status, summary and SHA-256 references. The driver checks the file/hash
+before accepting completion. Small dependency results stay inline; larger ones
+use references, and wide fan-in uses one manifest. A reviewer must inspect full
+results and artifacts before reaching a conclusion. `status` prints summaries;
+`result` reads one complete verified report on demand.
+
+`stats` reports message counts and bytes forwarded as task/dependency context.
+These are local traffic measurements, not billed tokens or proof of cache hits.
+Run records now use version 2; version 1 runs remain readable and keep inline
+report semantics when a worker helper is upgraded. Old CLIs refuse version 2
+records instead of misreading referenced results.
 
 ## Trust, approvals, and recovery
 

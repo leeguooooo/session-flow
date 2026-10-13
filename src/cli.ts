@@ -9,24 +9,32 @@ import { TmuxRuntime } from "./runtime";
 import { drive, reconcile } from "./engine";
 import { workerTask, workerReport } from "./worker";
 import { checked } from "./process";
+import { runMetrics } from "./metrics";
+import { resolveResult } from "./results";
 
 const cli = import.meta.path.includes("$bunfs") ? [process.execPath] : [process.execPath, import.meta.path];
 const transport = new OcsTransport(), runtime = new TmuxRuntime(cli);
 const args = process.argv.slice(2);
 function print(value: unknown) { console.log(JSON.stringify(value, null, 2)); }
-function publicRun(run: ReturnType<typeof loadRun>) {
+function publicRun(run: ReturnType<typeof loadRun>, full = false) {
   return { version: run.version, id: run.id, name: run.workflow.name, status: run.status, channel: run.channel,
-    steps: Object.fromEntries(Object.entries(run.steps).map(([id, { token: _, ...state }]) => [id, state])) };
+    steps: Object.fromEntries(Object.entries(run.steps).map(([id, { token: _, result, ...state }]) => [id, {
+      ...state, ...(result ? { result: full ? result : { status: result.status, summary: String(result.summary ?? "").slice(0, 384),
+        readFullResult: `sflow result ${run.id} ${id}` } } : {}),
+      ...(state.startedAt ? { elapsedMs: Math.max(0, (state.finishedAt ?? Date.now()) - state.startedAt) } : {}),
+    }])) };
 }
 async function main() {
   const [cmd, arg, ...rest] = args;
   if (!cmd || cmd === "help" || cmd === "--help") {
-    console.log(`Session Flow 0.1.0 — native agent sessions, connected by OCS
+    console.log(`Session Flow 0.1.1 — native agent sessions, connected by OCS
 
 sflow validate <workflow.json>       validate without starting agents
 sflow run <workflow.json>            create workers and drive the workflow
 sflow resume <run-id>                reconcile and continue; never recreate uncertain workers
 sflow status <run-id>                reconcile explicit worker reports, print JSON
+sflow stats <run-id>                 message counts and context bytes (not tokens)
+sflow result <run-id> <step-id>       read one complete result on demand
 sflow attach <run-id> <step-id>       inspect/interact with one owned native session
 sflow logs <run-id> <step-id>         capture its terminal output
 sflow stop <run-id>                  stop only this run's workers; retain artifacts
@@ -39,7 +47,7 @@ Claude/Codex authenticate through their own CLIs. No orcr or Herdr required.
 Native tmux adapter currently supports macOS/Linux. Ctrl-C stops the driver,
 leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
   }
-  if (cmd === "version") { console.log("0.1.0"); return; }
+  if (cmd === "version") { console.log("0.1.1"); return; }
   if (cmd === "task") { if (arg) throw new Error("task takes no arguments"); print(await workerTask(transport)); return; }
   if (cmd === "report") {
     if (!["--file", "--json"].includes(arg) || rest.length !== 1) throw new Error("report --file <result.json> or --json '<JSON>'");
@@ -59,6 +67,12 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
   }
   if (!arg) throw new Error("run id required");
   const run = loadRun(arg);
+  if (cmd === "result") {
+    if (rest.length !== 1 || !run.steps[rest[0]]) throw new Error("valid step id required");
+    reconcile(run, await transport.read(run.channel, `sflow-${run.id}`));
+    if (!run.steps[rest[0]].result) throw new Error("no terminal result yet");
+    print(resolveResult(run, rest[0], run.steps[rest[0]].result!)); return;
+  }
   if (cmd === "attach" || cmd === "logs") {
     if (rest.length !== 1 || !run.steps[rest[0]]) throw new Error("valid step id required");
     if (cmd === "logs") {
@@ -71,9 +85,11 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
     await new Promise<void>((res, rej) => { child.on("error", rej); child.on("exit", c => { process.exitCode = c ?? 1; res(); }); }); return;
   }
   if (rest.length) throw new Error("unexpected arguments");
-  if (cmd === "status") {
+  if (cmd === "status" || cmd === "stats") {
     // Read-only observer; the driver owns durable state mutations.
-    reconcile(run, await transport.read(run.channel, `sflow-${run.id}`)); print(publicRun(run)); return;
+    const rows = await transport.read(run.channel, `sflow-${run.id}`);
+    reconcile(run, rows);
+    if (cmd === "stats") print(runMetrics(run, rows)); else print(publicRun(run)); return;
   }
   if (cmd !== "resume" && cmd !== "stop") throw new Error(`unknown command: ${cmd}`);
   if (cmd === "stop") {

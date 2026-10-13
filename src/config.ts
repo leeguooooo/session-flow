@@ -58,5 +58,5 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
     visiting.add(id); step.dependsOn.forEach(visit); visiting.delete(id); visited.add(id);
   }
   steps.forEach(s => visit(s.id));
-  return { version: 1, name: o.name, concurrency: integer(o.concurrency, 2, 1, 16), steps };
+  return { version: 1, name: o.name, concurrency: integer(o.concurrency, 2, 1, 16), prefixWarmupMs: integer(o.prefixWarmupMs, 0, 0, 5000), steps };
 }

@@ -19,7 +19,7 @@ export function createRun(workflow: Workflow): Run {
   // private, short directory; never share the user's default tmux server.
   const socketDir = join(process.env.TMPDIR ?? "/tmp", `sf-${id.slice(0, 12)}`);
   mkdirSync(socketDir, { mode: 0o700 });
-  const run: Run = { version: 1, id, dir, socket: join(socketDir, "tmux.sock"), channel: `sflow-${id}`,
+  const run: Run = { version: 2, id, dir, socket: join(socketDir, "tmux.sock"), channel: `sflow-${id}`,
     workflow, createdAt: Date.now(), status: "running", steps: Object.fromEntries(workflow.steps.map(s => [s.id,
       { status: "pending", token: randomBytes(24).toString("hex"), session: `sf-${s.id}` }])) };
   saveRun(run); return run;
@@ -29,7 +29,7 @@ export function loadRun(id: string): Run {
   if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error("invalid run id");
   const dir = join(dataHome(), "runs", id);
   const run = JSON.parse(readFileSync(join(dir, "run.json"), "utf8")) as Run;
-  if (run.version !== 1 || run.id !== id || run.dir !== dir) throw new Error("invalid run record");
+  if (![1, 2].includes(run.version) || run.id !== id || run.dir !== dir) throw new Error("invalid run record");
   if (basename(run.socket) !== "tmux.sock" || basename(dirname(run.socket)) !== `sf-${id.slice(0, 12)}`) throw new Error("invalid owned runtime socket path");
   if (existsSync(dirname(run.socket))) {
     const owner = lstatSync(dirname(run.socket));

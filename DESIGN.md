@@ -18,6 +18,24 @@ The driver persists dispatch intent before sending an assignment. After a crash 
 
 Workers fetch their task from OCS using `sflow task`. Returning the task requires explicit acceptance to be stored first. They report a terminal result with `sflow report`. Idle, CLI exit code, process exit, and message delivery are not completion evidence. A successful report is the worker's claim; downstream review and the human/main agent remain responsible for artifact verification.
 
+Coordination is quiet: one assignment, one acceptance and one terminal result per
+step, all without waking another model. Complete results are immutable files;
+signed result references are verified before completion. The driver stores the
+reference instead of copying the report into every snapshot. Status queries show
+summaries, and full results are explicit reads. New run record version 2 prevents
+old drivers from interpreting file references as complete inline reports; legacy
+version 1 runs keep their wire semantics when the helper is upgraded.
+
+Read-only workers share `.protocol` as their native cwd and the same tool set;
+per-step approved wrappers, tokens and result paths remain distinct. No shared
+dispatcher lets a model select another step. A native session that accepted one
+step cannot claim another. Identical agent/model groups may opt into a bounded
+prefix warmup hold with `prefixWarmupMs` (default 0, maximum 5000). This
+does not prove a cache hit, and tool/account/model differences may prevent reuse.
+Write workers stay isolated. Dependency context is inline only up to 1 KiB per
+result and 4 KiB aggregate; larger fan-in is a SHA-256 manifest. The full evidence
+remains available for verification. Byte/message metrics are not token billing.
+
 Each step has one attempt. There is no automatic retry, model fallback, or reassignment. Use a new run for a deliberately repeated attempt after inspecting the original workers and outputs.
 
 Dependency outputs are data, not instructions. Small results are inline; large results are referenced by private local file and SHA-256. No automatic cherry-pick, merge, or push. Write steps require isolated worktrees and retain their diffs for the main agent to review and commit. Review steps receive artifact paths from preceding workers.
@@ -29,6 +47,12 @@ No global permission settings are changed, and no bypass flag is used. Native tr
 Codex review workers run in a protocol directory with a workspace-write sandbox, with default `/tmp` writable exceptions disabled. The inspected project is outside the write roots; the protocol directory and OCS home are writable for reporting. The workflow rejects overlap with those roots. This is not the native `read-only` sandbox. Claude review workers deny file-edit tools and retain standard shell approvals; their read-only policy is an instruction plus permission gates, not a filesystem security boundary.
 
 OCS and native auth/config stay in the user's account. Workers share that OS user. The run directory is private, but same-user processes can read it. Capabilities/proofs prevent accidental misrouting and corrupted reports, not a malicious same-user agent. No security isolation between workers is claimed. Workflow prompts and results must not contain credentials.
+
+Per-step command scoping is enforced by Claude's allow rules. Codex's shell can
+execute another step's wrapper as the same user; before its own first acceptance,
+the one-actor-one-step check cannot bind it to the intended step. Workers must
+follow their own bootstrap. This is a same-user trust boundary, not agent
+authentication or protection against hostile project instructions.
 
 The concurrency cap includes live blocked workers. Completed owned sessions are captured to `terminal.txt` before cleanup to release slots; worktrees and results are retained. Cancelling stops only sessions on this run's private socket. A crash during stale-lock recovery leaves a tombstone requiring inspection; fail closed rather than risk two drivers. Restart/OS cleanup may remove the tmux socket; absent workers become uncertain.
 

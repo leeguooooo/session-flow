@@ -6,10 +6,18 @@ permissions:
   contents: write
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        platform: [darwin-arm64, darwin-x64, linux-x64, linux-arm64]
+        include:
+          - platform: darwin-arm64
+            runner: macos-14
+          - platform: darwin-x64
+            runner: macos-14
+          - platform: linux-x64
+            runner: ubuntu-latest
+          - platform: linux-arm64
+            runner: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -23,8 +31,15 @@ jobs:
         run: |
           mkdir -p release
           bun build --compile --target="bun-$PLATFORM" src/cli.ts --outfile release/sflow
+          case "$PLATFORM" in
+            darwin-*) codesign --force --sign - release/sflow; codesign --verify --strict release/sflow ;;
+          esac
           tar -C release -czf "sflow-$PLATFORM.tar.gz" sflow
-          sha256sum "sflow-$PLATFORM.tar.gz" > "sflow-$PLATFORM.tar.gz.sha256"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "sflow-$PLATFORM.tar.gz" > "sflow-$PLATFORM.tar.gz.sha256"
+          else
+            shasum -a 256 "sflow-$PLATFORM.tar.gz" > "sflow-$PLATFORM.tar.gz.sha256"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: sflow-${{ matrix.platform }}

@@ -239,7 +239,15 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
     } else {
       if (run.status === "cancelled") throw new Error("cancelled runs cannot be resumed");
       if (existsSync(resolve(run.dir, "cancel.request"))) throw new Error("cancellation is pending; run sflow stop to finish cancelling before starting a new run");
-      run.status = "running"; await driveWatched(run, resumeMode);
+      // A worker that missed its readiness window but is still open gets a fresh one: the same
+      // session, no resend. Terminal reports and uncertain outcomes stay as they are.
+      for (const step of run.workflow.steps) {
+        const s = run.steps[step.id];
+        if (s.status === "blocked" && !s.result && !s.actor && s.error?.startsWith("no acceptance") && await runtime.exists(run, step.id)) {
+          s.status = "starting"; s.promptAt = Date.now(); delete s.error;
+        }
+      }
+      run.status = "running"; saveRun(run); await driveWatched(run, resumeMode);
     }
   } finally { unlock(); }
   print(publicRun(run)); if (String(run.status) !== "done" && cmd === "resume") { console.error(`Answer any prompt in sflow status (or logs/attach), then: sflow resume ${run.id}`); process.exitCode = 2; }

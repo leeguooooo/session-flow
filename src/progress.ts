@@ -24,6 +24,8 @@ export function describe(workflow: Workflow): string[] {
 export class Progress {
   private status = new Map<string, string>();
   private prompts = new Map<string, Menu>();
+  // The TUI redraws a moment after a key; until then the answered menu is still on screen.
+  private answered = new Map<string, { id: string; at: number }>();
   private changedAt = Date.now();
   private timer?: ReturnType<typeof setInterval>;
   private busy = false;
@@ -75,6 +77,8 @@ export class Progress {
         // Trust/login prompts come before acceptance, tool approvals after it.
         if (["starting", "running"].includes(s.status) && this.mode !== "none") {
           const menu = await this.runtime.waitingOnPrompt(this.run, step.id);
+          const recent = this.answered.get(step.id);
+          if (menu && recent?.id === menu.id && Date.now() - recent.at < 5000) continue;
           if (menu && this.prompts.get(step.id)?.id !== menu.id) { this.prompts.set(step.id, menu); this.changedAt = Date.now(); this.showPrompt(step.id, step.agent, menu); }
           if (!menu) this.prompts.delete(step.id);
         }
@@ -117,7 +121,7 @@ export class Progress {
     let keys: string[];
     try { keys = menuKeys(now, Number(m[2])); } catch (e) { this.write(`  ${(e as Error).message}`); return; }
     await this.runtime.keys(this.run, stepId, keys);
-    this.prompts.delete(stepId);
+    this.prompts.delete(stepId); this.answered.set(stepId, { id: now.id, at: Date.now() });
     this.emit({ type: "answered", step: stepId, option: now.options[Number(m[2]) - 1] }, `${stepId}: answered "${now.options[Number(m[2]) - 1]}"`);
   }
 }

@@ -5,7 +5,7 @@ export interface Menu { id: string; question: string[]; options: string[]; selec
 
 const MARKER = /^(\s*)([❯›>])\s(.*\S)\s*$/;
 // Every supported TUI prints a key hint under its menus; an input box ("› Ask Codex…") has none.
-const HINT = /enter to confirm|press enter|navigate|esc to cancel/i;
+const HINT = /\benter\b.{0,12}\b(confirm|continue|select|submit)\b|press enter|navigate|\besc\b.{0,4}\b(cancel|quit|exit)\b/i;
 
 // Reads the visible screen bottom-up and returns the last menu, or null. Options keep the
 // TUI's own text, so the user sees exactly what will be chosen.
@@ -14,13 +14,29 @@ export function parseMenu(screen: string): Menu | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     const m = MARKER.exec(lines[i]);
     if (!m) continue;
-    const width = m[1].length + 2, sibling = new RegExp(`^${" ".repeat(width)}(\\S.*\\S|\\S)\\s*$`);
-    let start = i, end = i;
-    while (start > 0 && sibling.test(lines[start - 1])) start--;
-    while (end + 1 < lines.length && sibling.test(lines[end + 1])) end++;
-    if (end === start) continue;
+    // In a numbered menu every option is numbered, which keeps same-indented question text out.
+    const numbered = /^\d+[.)]\s/.test(m[3]);
+    const width = m[1].length + 2, sibling = new RegExp(`^${" ".repeat(width)}${numbered ? "\\d+[.)]\\s" : ""}(\\S.*\\S|\\S)\\s*$`);
+    // Codex indents its key hint like an option; the hint ends the list. A long option wraps onto
+    // deeper-indented lines that belong to it.
+    const option = (l: string) => sibling.test(l) && !HINT.test(l);
+    const wrapped = (l: string) => /^\s*/.exec(l)![0].length > width && l.trim() !== "" && !HINT.test(l) && !MARKER.test(l);
+    const entries: { line: number; text: string }[] = [{ line: i, text: m[3].trim() }];
+    let end = i;
+    for (let j = i + 1; j < lines.length; j++) {
+      if (option(lines[j])) { entries.push({ line: j, text: lines[j].trim() }); end = j; }
+      else if (wrapped(lines[j])) { entries[entries.length - 1].text += " " + lines[j].trim(); end = j; }
+      else break;
+    }
+    let start = i, carry: string[] = [];
+    for (let j = i - 1; j >= 0; j--) {
+      if (option(lines[j])) { entries.unshift({ line: j, text: [lines[j].trim(), ...carry].join(" ") }); carry = []; start = j; }
+      else if (wrapped(lines[j])) carry.unshift(lines[j].trim());
+      else break;
+    }
+    if (entries.length < 2) continue;
     if (!lines.slice(end + 1, end + 5).some(l => HINT.test(l))) continue;
-    const options = lines.slice(start, end + 1).map(l => l.replace(MARKER, "$3").trim().replace(/^\d+[.)]\s+/, ""));
+    const options = entries.map(e => e.text.replace(/^\d+[.)]\s+/, ""));
     const question: string[] = [];
     for (let j = start - 1; j >= 0 && question.length < 12; j--) {
       const text = lines[j].trim();
@@ -29,7 +45,7 @@ export function parseMenu(screen: string): Menu | null {
     }
     while (question.length && !question[0]) question.shift();
     const id = createHash("sha256").update(JSON.stringify([question, options])).digest("hex").slice(0, 8);
-    return { id, question, options, selected: i - start };
+    return { id, question, options, selected: entries.findIndex(e => e.line === i) };
   }
   return null;
 }

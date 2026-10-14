@@ -44,6 +44,22 @@ const codexIdle = `› Session Flow worker. Run '~/…/double/worker' task once;
 
   GPT-6.1-Sol medium · ~/…/.protocol`;
 
+const codexTrust = `  Folder access
+  ~/…/runs/0f86ecad/implement/worktree
+  Note: You’re in a subdirectory of a Git project. Trusting will apply to the repository root:
+  ~/demo1
+  Trust this folder? Codex can read, edit, and run files here, subject to your permission settings.
+› 1. Trust and continue
+  2. Quit
+  enter continue · esc quit`;
+
+test("reads Codex's folder-trust menu", () => {
+  const menu = parseMenu(codexTrust)!;
+  expect(menu.options).toEqual(["Trust and continue", "Quit"]);
+  expect(menu.question.at(-1)).toContain("Trust this folder?");
+  expect(menuKeys(menu, 1)).toEqual(["Enter"]);
+});
+
 test("reads Claude's unnumbered folder-trust menu", () => {
   const menu = parseMenu(claudeTrust)!;
   expect(menu.options).toEqual(["No, exit", "Yes, I trust this folder"]);
@@ -84,4 +100,24 @@ test("screen diagnosis reports only recognised errors", () => {
   expect(diagnoseScreen(codexIdle)).toBeNull();
   expect(diagnoseScreen(claudeTrust)).toBeNull();
   expect(diagnoseScreen("Processed 500 files")).toBeNull();
+});
+
+test("a long option that wraps stays one option", () => {
+  const screen = ` Bash command
+ Rerun tests and edge cases read-only
+ This command requires approval
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for sh test.sh, sh greet.sh --shout Ada and sh greet.sh Ada commands
+      in ~/.local/state/session-flow/workspaces/claude
+   3. Yes, and switch to auto mode · auto mode handles these prompts for you
+   4. No
+
+ Esc to cancel · Tab to amend`;
+  const menu = parseMenu(screen)!;
+  expect(menu.options).toHaveLength(4);
+  expect(menu.options[1]).toBe("Yes, and don't ask again for sh test.sh, sh greet.sh --shout Ada and sh greet.sh Ada commands in ~/.local/state/session-flow/workspaces/claude");
+  expect(menu.options[3]).toBe("No");
+  expect(menu.question).toContain("Do you want to proceed?");
+  expect(menuKeys(menu, 4)).toEqual(["Down", "Down", "Down", "Enter"]);
 });

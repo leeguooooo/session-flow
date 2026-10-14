@@ -64,6 +64,9 @@ test("progress reports observed changes and prompts, and a typed number answers 
   await progress.answer("2");
   expect(sent).toEqual([["Down", "Enter"]]);
   expect(lines.at(-1)).toContain('answered "Yes, I trust this folder"');
+  const answeredAt = lines.length;
+  await progress.poll(); // the screen has not redrawn yet: the answered prompt is not shown again
+  expect(lines.length).toBe(answeredAt);
 
   run.steps.plan.status = "done"; run.steps.plan.result = { status: "done", summary: "plan-ready" };
   await progress.poll();

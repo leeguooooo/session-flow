@@ -56,6 +56,12 @@ async function driveWatched(run: ReturnType<typeof loadRun>, mode: ProgressMode)
 async function main() {
   const [cmd, arg, ...rest] = args;
   maybeNotice(pkg.version, cmd, cli);
+  // Inside a worker wrapper the only useful commands are task and report; a bare call (seen from a
+  // Pi worker) gets that, not the driver help it would then improvise from.
+  if (!cmd && process.env.SFLOW_TOKEN && process.env.SFLOW_STEP_ID) {
+    console.log(`This is the Session Flow worker command for step ${process.env.SFLOW_STEP_ID}. Run it with "task" to get your assignment, then "report --json '<JSON>'" once when finished.`);
+    return;
+  }
   if (!cmd || cmd === "help" || cmd === "--help") {
     console.log(`Session Flow ${pkg.version} — native agent sessions, connected by OCS
 

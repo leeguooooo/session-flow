@@ -33,3 +33,10 @@ test("preflight passes working tools and reports a broken one", async () => {
     expect(err).not.toContain("tmux");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("a bare worker wrapper call says to run task, not the driver help", () => {
+  const env = { ...process.env, SFLOW_TOKEN: "t", SFLOW_STEP_ID: "join", SFLOW_NO_UPDATE_CHECK: "1" };
+  const out = Bun.spawnSync(["bun", "src/cli.ts"], { env, cwd: import.meta.dir + "/.." }).stdout.toString();
+  expect(out).toContain('step join. Run it with "task"');
+  expect(out).not.toContain("sflow init");
+});

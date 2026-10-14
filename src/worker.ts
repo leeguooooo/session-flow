@@ -7,7 +7,7 @@ import { resolveResult, storeResult } from "./results";
 
 function context() {
   const id = process.env.SFLOW_RUN_ID, stepId = process.env.SFLOW_STEP_ID, token = process.env.SFLOW_TOKEN;
-  if (!id || !stepId || !token) throw new Error("worker commands must run in a Session Flow worker");
+  if (!id || !stepId || !token) throw new Error("worker commands must run through the worker path given in your Session Flow prompt (<run>/<step>/worker task, then <run>/<step>/worker report …), not through plain sflow");
   const run = loadRun(id), state = run.steps[stepId];
   if (!state || token.length !== state.token.length || !timingSafeEqual(Buffer.from(token), Buffer.from(state.token))) throw new Error("invalid worker capability");
   if (["pending", "dispatching", "cancelled"].includes(state.status)) throw new Error("step is not eligible to execute");

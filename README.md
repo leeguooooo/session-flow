@@ -1,5 +1,11 @@
 # Session Flow
 
+English | [简体中文](README.zh-CN.md)
+
+https://github.com/user-attachments/assets/5f564a03-848a-4a9e-bbf3-ac68cea78efd
+
+The middle of the video is a real run of [examples/smoke.json](examples/smoke.json), captured from its tmux panes.
+
 Run a workflow across independent Claude Code and Codex sessions. Each step selects its agent and model; OCS carries assignments and explicit results. The first runtime adapter creates native TUIs in private tmux sessions on macOS/Linux.
 
 No orcr, Herdr, API proxy, or copied OCS internals. Native CLIs use their own authenticated accounts.
@@ -12,7 +18,7 @@ GitHub Release binaries are installed with:
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/session-flow/main/install.sh | sh
 ```
 
-The installer requires a published GitHub Release. To use the initial source version before its first release:
+To build from source instead:
 
 ```sh
 bun install

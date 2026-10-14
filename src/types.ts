@@ -81,8 +81,10 @@ export interface SessionRuntime {
   create(run: Run, step: Step): Promise<void>;
   exists(run: Run, stepId: string): Promise<boolean>;
   stop(run: Run, stepId: string): Promise<void>;
-  // True while the worker's TUI shows a menu for the user (trust, approval, login).
-  waitingOnPrompt?(run: Run, stepId: string): Promise<boolean>;
+  // The menu the worker's TUI shows the user (trust, approval, login), if any.
+  waitingOnPrompt?(run: Run, stepId: string): Promise<{ id: string; question: string[]; options: string[] } | null>;
+  // A line from the worker's screen that explains why it has not accepted, if one is recognisable.
+  diagnose?(run: Run, stepId: string): Promise<string | null>;
 }
 export interface Transport {
   read(channel: string, as: string): Promise<Message[]>;

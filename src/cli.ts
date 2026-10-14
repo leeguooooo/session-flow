@@ -14,6 +14,8 @@ import { resolveResult } from "./results";
 import { preflight, requiredTools } from "./preflight";
 import { installSkill } from "./skill";
 import { parseMenu, menuKeys } from "./prompt";
+import { Progress, describe, type ProgressMode } from "./progress";
+import { reviewRun, renderReview } from "./review";
 import { maybeNotice, runUpdateCheck, upgrade, UPDATE_CHECK_COMMAND } from "./upgrade";
 import pkg from "../package.json";
 
@@ -29,6 +31,26 @@ function publicRun(run: ReturnType<typeof loadRun>, full = false) {
       ...(state.startedAt ? { elapsedMs: Math.max(0, (state.finishedAt ?? Date.now()) - state.startedAt) } : {}),
     }])) };
 }
+// Removes "--name value" from the argument list and returns the value.
+function takeFlag(list: string[], name: string): string | undefined {
+  const i = list.indexOf(name);
+  if (i < 0) return undefined;
+  const value = list[i + 1];
+  if (value === undefined || value.startsWith("--")) throw new Error(`${name} needs a value`);
+  list.splice(i, 2); return value;
+}
+function progressMode(list: string[]): ProgressMode {
+  const mode = takeFlag(list, "--progress") ?? "text";
+  if (!["text", "json", "none"].includes(mode)) throw new Error("--progress text|json|none");
+  return mode as ProgressMode;
+}
+// stdout keeps the machine-readable JSON (run id first, final state last); progress goes to stderr.
+async function driveWatched(run: ReturnType<typeof loadRun>, mode: ProgressMode) {
+  const progress = new Progress(run, runtime, mode); progress.start();
+  try { await drive(run, runtime, transport); } finally { await progress.stop(); }
+  if (mode === "text") for (const line of renderReview(await reviewRun(run, runtime))) console.error(line);
+  else if (mode === "json") console.error(JSON.stringify({ type: "review", ...await reviewRun(run, runtime) }));
+}
 async function main() {
   const [cmd, arg, ...rest] = args;
   maybeNotice(pkg.version, cmd, cli);
@@ -36,8 +58,11 @@ async function main() {
     console.log(`Session Flow ${pkg.version} — native agent sessions, connected by OCS
 
 sflow validate <workflow.json>       validate without starting agents
-sflow run <workflow.json>            create workers and drive the workflow
-sflow resume <run-id>                reconcile and continue; never recreate uncertain workers
+sflow run <workflow.json> [--progress text|json|none]
+                                     create workers and drive the workflow; progress on stderr,
+                                     typed numbers answer a worker's trust/approval prompt
+sflow resume <run-id> [--progress …]  reconcile and continue; never recreate uncertain workers
+sflow review <run-id> [--json]        what each step reported, what sflow saw, what is left to do
 sflow status <run-id>                reconcile explicit worker reports, print JSON
 sflow stats <run-id>                 message counts and context bytes (not tokens)
 sflow result <run-id> <step-id>       read one complete result on demand
@@ -74,14 +99,15 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
     print(await workerReport(transport, JSON.parse(arg === "--file" ? readFileSync(rest[0], "utf8") : rest[0] === "-" ? readFileSync(0, "utf8") : rest[0]))); return;
   }
   if (cmd === "validate" || cmd === "run") {
-    if (!arg || rest.length) throw new Error(`${cmd} <workflow.json>`);
+    const mode = cmd === "run" ? progressMode(rest) : "none";
+    if (!arg || rest.length) throw new Error(`${cmd} <workflow.json>${cmd === "run" ? " [--progress text|json|none]" : ""}`);
     const file = resolve(arg), workflow = parseWorkflow(JSON.parse(readFileSync(file, "utf8")), dirname(file));
-    if (cmd === "validate") { print({ valid: true, workflow }); return; }
+    if (cmd === "validate") { for (const line of describe(workflow)) console.error(line); print({ valid: true, workflow }); return; }
     if (process.platform === "win32") throw new Error("tmux adapter requires macOS/Linux");
     await preflight(requiredTools(runtime.binary, transport.binary, workflow.steps.map(s => s.agent)));
     const run = createRun(workflow); print({ runId: run.id, channel: run.channel });
     const unlock = lockRun(run);
-    try { await drive(run, runtime, transport); } finally { unlock(); }
+    try { await driveWatched(run, mode); } finally { unlock(); }
     print(publicRun(run)); if (run.status !== "done") { console.error(`Answer any prompt in sflow status (or logs/attach), then: sflow resume ${run.id}`); process.exitCode = 2; } return;
   }
   if (!arg) throw new Error("run id required");
@@ -116,6 +142,15 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
     await Bun.sleep(500);
     const after = parseMenu(await runtime.screen(run, step));
     print({ step, answered: menu.options[Number(choice) - 1], ...(after ? { nextPrompt: after } : {}) }); return;
+  }
+  const resumeMode = cmd === "resume" ? progressMode(rest) : "none";
+  if (cmd === "review") {
+    const json = rest[0] === "--json";
+    if (rest.length > (json ? 1 : 0)) throw new Error("review <run-id> [--json]");
+    reconcile(run, await transport.read(run.channel, `sflow-${run.id}`));
+    const review = await reviewRun(run, runtime);
+    if (json) print(review); else console.log(renderReview(review).join("\n"));
+    return;
   }
   if (rest.length) throw new Error("unexpected arguments");
   if (cmd === "status" || cmd === "stats") {
@@ -170,7 +205,7 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
     } else {
       if (run.status === "cancelled") throw new Error("cancelled runs cannot be resumed");
       if (existsSync(resolve(run.dir, "cancel.request"))) throw new Error("cancellation is pending; run sflow stop to finish cancelling before starting a new run");
-      run.status = "running"; await drive(run, runtime, transport);
+      run.status = "running"; await driveWatched(run, resumeMode);
     }
   } finally { unlock(); }
   print(publicRun(run)); if (String(run.status) !== "done" && cmd === "resume") { console.error(`Answer any prompt in sflow status (or logs/attach), then: sflow resume ${run.id}`); process.exitCode = 2; }

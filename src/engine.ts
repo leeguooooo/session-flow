@@ -81,7 +81,10 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
       if (Date.now() - (s.startedAt ?? Date.now()) > step.timeoutSeconds * 1000) {
         s.status = "blocked"; s.error = "step timed out; worker retained for inspection"; saveRun(run);
       } else if (s.status === "starting" && Date.now() - readyFrom > step.readyTimeoutSeconds * 1000) {
-        s.status = "blocked"; s.error = `no acceptance yet; check sflow status ${run.id} for a waiting prompt or sflow logs ${run.id} ${step.id}`; saveRun(run);
+        const seen = await runtime.diagnose?.(run, step.id);
+        s.status = "blocked";
+        s.error = `no acceptance within ${step.readyTimeoutSeconds}s; ${seen ? `the worker screen shows: ${seen}` : "cause unknown (no prompt or error recognised on screen)"}; inspect with sflow logs ${run.id} ${step.id}`;
+        saveRun(run);
       } else if (!await runtime.exists(run, step.id)) {
         s.status = "uncertain"; s.uncertainty = "worker"; s.error = "worker exited without an explicit completion report"; saveRun(run);
       }

@@ -40,3 +40,12 @@ export function menuKeys(menu: Menu, choice: number): string[] {
   const delta = choice - 1 - menu.selected;
   return [...Array(Math.abs(delta)).fill(delta > 0 ? "Down" : "Up"), "Enter"];
 }
+
+// Errors a worker's screen can show before it accepts. Only what is seen is reported; anything
+// else is "cause unknown", never assumed to be a trust or approval prompt.
+const TROUBLE = /\b(HTTP\s*)?5\d\d\b.*(error|gateway|timeout|unavailable)|\b(error|gateway|timeout)\b.*\b5\d\d\b|rate.?limit|quota|not logged in|log ?in required|please (log|sign) in|sign in to|unauthori[sz]ed|authenticat(e|ion) (failed|required)|api key|connection (refused|reset|error)|network error|ECONNREFUSED|ETIMEDOUT/i;
+export function diagnoseScreen(screen: string): string | null {
+  const lines = screen.split("\n").map(l => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) if (TROUBLE.test(lines[i])) return lines[i].slice(0, 200);
+  return null;
+}

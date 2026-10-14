@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { parseMenu, menuKeys } from "../src/prompt";
+import { parseMenu, menuKeys, diagnoseScreen } from "../src/prompt";
 
 // Screens recorded from real runs (paths shortened).
 const claudeTrust = `────────────────────────────────────────────────
@@ -74,4 +74,14 @@ test("the prompt id changes when the question or options change", () => {
   expect(a.id).toMatch(/^[0-9a-f]{8}$/);
   expect(parseMenu(agyApproval)!.id).toBe(a.id);
   expect(b.id).not.toBe(a.id);
+});
+
+test("screen diagnosis reports only recognised errors", () => {
+  expect(diagnoseScreen("thinking...\n  Error: 524 status code (no body)\n> ")).toBe("Error: 524 status code (no body)");
+  expect(diagnoseScreen("HTTP 503 Service Unavailable")).toBe("HTTP 503 Service Unavailable");
+  expect(diagnoseScreen("Not logged in · Please run /login")).toContain("Not logged in");
+  expect(diagnoseScreen("Rate limit reached, retrying in 30s")).toContain("Rate limit");
+  expect(diagnoseScreen(codexIdle)).toBeNull();
+  expect(diagnoseScreen(claudeTrust)).toBeNull();
+  expect(diagnoseScreen("Processed 500 files")).toBeNull();
 });

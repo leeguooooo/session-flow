@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { checked, command, cleanEnv, quote } from "./process";
 import { saveRun } from "./store";
-import { parseMenu } from "./prompt";
+import { diagnoseScreen, parseMenu, type Menu } from "./prompt";
 import type { Run, Step, SessionRuntime } from "./types";
 
 export class TmuxRuntime implements SessionRuntime {
@@ -21,7 +21,12 @@ export class TmuxRuntime implements SessionRuntime {
     // Review workers run in a protocol-only directory, leaving the reviewed
     // repository outside Codex's workspace-write roots.
     const commonCwd = join(run.dir, ".protocol"); mkdirSync(commonCwd, { mode: 0o700, recursive: true });
-    state.cwd = step.policy === "read-only" ? commonCwd : step.cwd;
+    // Claude asks to trust each new working directory. Read-only Claude steps share one stable,
+    // empty directory, so that question comes once per machine instead of once per run; run files
+    // are reached by absolute path. Other agents keep the per-run protocol directory.
+    const claudeCwd = join(process.env.SFLOW_HOME ?? join(homedir(), ".local/state/session-flow"), "workspaces", "claude");
+    if (step.agent === "claude" && step.policy === "read-only") mkdirSync(claudeCwd, { mode: 0o700, recursive: true });
+    state.cwd = step.policy !== "read-only" ? step.cwd : step.agent === "claude" ? claudeCwd : commonCwd;
     saveRun(run);
     if (step.worktree) {
       const cwd = join(dir, "worktree");
@@ -52,7 +57,7 @@ Report once using ${cliText} report --json '<JSON>' (or --json - with JSON on st
     if (step.agent === "claude") {
       const settings = join(commonCwd, "claude-settings.json");
       if (!existsSync(settings)) writeFileSync(settings, JSON.stringify({ permissions: { crossSessionInbound: "accept" } }), { mode: 0o600 });
-      argv = ["claude", "--permission-mode", "default", "--settings", settings, "--name", `sflow-${step.id}`,
+      argv = ["claude", "--permission-mode", "default", "--settings", settings, "--name", `sflow-${step.id}`, "--add-dir", run.dir,
         "--allowedTools", `Bash(${cliText} task),Bash(${cliText} report *)`];
       if (step.policy === "read-only") argv.push("--disallowedTools", "Edit,Write,NotebookEdit");
       if (step.model) argv.push("--model", step.model);
@@ -102,8 +107,11 @@ Report once using ${cliText} report --json '<JSON>' (or --json - with JSON on st
     // One key per call with a short pause: TUIs redraw between keys and can drop a burst.
     for (const key of keys) { await checked([this.binary, "-S", run.socket, "send-keys", "-t", `${run.steps[id].session}:0.0`, key]); await Bun.sleep(120); }
   }
-  async waitingOnPrompt(run: Run, id: string) {
-    try { return parseMenu(await this.screen(run, id)) !== null; } catch { return false; }
+  async waitingOnPrompt(run: Run, id: string): Promise<Menu | null> {
+    try { return parseMenu(await this.screen(run, id)); } catch { return null; }
+  }
+  async diagnose(run: Run, id: string) {
+    try { return diagnoseScreen(await this.screen(run, id)); } catch { return null; }
   }
   attachArgs(run: Run, id: string) { return [this.binary, "-S", run.socket, "attach-session", "-t", `=${run.steps[id].session}`]; }
 }

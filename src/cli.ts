@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { readFileSync, existsSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { parseWorkflow } from "./config";
@@ -17,6 +17,7 @@ import { parseMenu, menuKeys } from "./prompt";
 import { Progress, describe, type ProgressMode } from "./progress";
 import { reviewRun, renderReview } from "./review";
 import { doctor, renderChecks } from "./doctor";
+import { buildPreset, PRESETS } from "./presets";
 import { maybeNotice, runUpdateCheck, upgrade, UPDATE_CHECK_COMMAND } from "./upgrade";
 import pkg from "../package.json";
 
@@ -59,6 +60,8 @@ async function main() {
     console.log(`Session Flow ${pkg.version} — native agent sessions, connected by OCS
 
 sflow doctor [workflow.json] [--json] check tmux, ocs, agent CLIs and their sign-in (no model calls)
+sflow init <preset> --task "…"       write a workflow for a common shape (review, implement-review,
+                                     plan-implement-review, fan-out); run "sflow init" to list them
 sflow validate <workflow.json>       validate without starting agents
 sflow run <workflow.json> [--progress text|json|none]
                                      create workers and drive the workflow; progress on stderr,
@@ -94,6 +97,26 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
   if (cmd === "skill") {
     if (arg !== "install" || rest.length) throw new Error("skill install");
     for (const path of installSkill()) console.log(`installed ${path}`); return;
+  }
+  if (cmd === "init") {
+    const list = args.slice(2);
+    if (!arg || arg.startsWith("--")) {
+      console.log(`sflow init <preset> --task "<what to do>" [--cwd <project>] [options]\n\npresets:\n${Object.entries(PRESETS).map(([k, v]) => `  ${k.padEnd(22)} ${v}`).join("\n")}\n\noptions: --write (required for presets that change code), --plan/--implement/--review/--join <agent>, --agents a,b, --name <name>, --out <file>, --print, --force`);
+      return;
+    }
+    const flag = (name: string) => takeFlag(list, name);
+    const bool = (name: string) => { const i = list.indexOf(name); if (i < 0) return false; list.splice(i, 1); return true; };
+    const write = bool("--write"), printOnly = bool("--print"), force = bool("--force");
+    const opts = { task: flag("--task") ?? "", cwd: flag("--cwd") ?? ".", write, plan: flag("--plan"), implement: flag("--implement"), review: flag("--review"),
+      join: flag("--join"), agents: flag("--agents")?.split(",").map(a => a.trim()).filter(Boolean), name: flag("--name") };
+    const out = resolve(flag("--out") ?? `.sflow/${opts.name ?? arg}.json`);
+    if (list.length) throw new Error(`unexpected arguments: ${list.join(" ")}`);
+    const json = buildPreset(arg, opts);
+    const workflow = parseWorkflow(json, dirname(out));
+    if (printOnly) { for (const line of describe(workflow)) console.error(line); print(json); return; }
+    if (existsSync(out) && !force) throw new Error(`${out} exists; pass --force to replace it or --out <file>`);
+    mkdirSync(dirname(out), { recursive: true }); writeFileSync(out, JSON.stringify(json, null, 2) + "\n");
+    console.log([`wrote ${out}`, ...describe(workflow), `edit it if needed, then: sflow run ${out}`].join("\n")); return;
   }
   if (cmd === "doctor") {
     const list = args.slice(1), json = list.includes("--json");

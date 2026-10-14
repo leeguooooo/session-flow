@@ -66,3 +66,18 @@ test("an unknown command is reported as unknown, and a missing id points to runs
   expect(run("list")).toContain("unknown command: list");
   expect(run("status")).toContain("find it with: sflow runs");
 });
+
+test("--cwd matches the real directory behind a symlink, and a deleted project by its recorded path (#10)", () => {
+  const { symlinkSync } = require("node:fs") as typeof import("node:fs");
+  const root = home();
+  const run = make(root, "review", "real", 1000);
+  symlinkSync(join(root, "real"), join(root, "alias"));
+  const { runs } = listRuns();
+  expect(filterRuns(runs, { cwd: join(root, "alias") }).map(r => r.id)).toEqual([run.id]);
+  expect(filterRuns(runs, { cwd: join(root, "real") }).map(r => r.id)).toEqual([run.id]);
+  expect(filterRuns(runs, { cwd: root }).map(r => r.id)).toEqual([run.id]);
+  rmSync(join(root, "real"), { recursive: true });
+  expect(filterRuns(listRuns().runs, { cwd: join(root, "real") }).map(r => r.id)).toEqual([run.id]);
+  expect(renderRuns([], [], 1)[0]).toContain("no matching runs");
+  expect(renderRuns([], [], 0)[0]).toBe("no runs recorded yet");
+});

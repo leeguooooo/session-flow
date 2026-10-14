@@ -170,7 +170,7 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
     }
     const { runs, broken } = listRuns(), shown = filterRuns(runs, opts);
     if (json) print({ runs: shown, broken, note: "step states are as recorded; sflow status <id> shows live prompts" });
-    else console.log(renderRuns(shown, broken).join("\n"));
+    else console.log(renderRuns(shown, broken, runs.length + broken.length).join("\n"));
     return;
   }
   if (!RUN_COMMANDS.has(cmd)) throw new Error(`unknown command: ${cmd} (see sflow help)`);

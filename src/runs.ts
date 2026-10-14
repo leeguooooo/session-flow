@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { dataHome, loadRun } from "./store";
 
@@ -40,9 +40,14 @@ export function listRuns(): { runs: RunEntry[]; broken: BrokenRun[] } {
   return { runs, broken };
 }
 
+// Compare real directories (macOS /tmp is /private/tmp, projects may be symlinked); a deleted
+// directory falls back to its recorded spelling so its history stays findable (#10).
+function canon(path: string): string { try { return realpathSync(path); } catch { return resolve(path); } }
+
 export function filterRuns(runs: RunEntry[], opts: { cwd?: string; status?: string; limit?: number }): RunEntry[] {
-  const root = opts.cwd ? resolve(opts.cwd) : undefined;
-  return runs.filter(r => (!root || r.cwds.some(c => c === root || c.startsWith(root + sep))) && (!opts.status || r.status === opts.status))
+  const root = opts.cwd ? canon(opts.cwd) : undefined;
+  const under = (c: string) => [c, canon(c)].some(p => p === root || p.startsWith(root + sep));
+  return runs.filter(r => (!root || r.cwds.some(under)) && (!opts.status || r.status === opts.status))
     .slice(0, opts.limit ?? 20);
 }
 
@@ -63,8 +68,9 @@ export function stamp(ms: number): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-export function renderRuns(runs: RunEntry[], broken: BrokenRun[]): string[] {
-  if (!runs.length && !broken.length) return ["no runs recorded yet"];
+export function renderRuns(runs: RunEntry[], broken: BrokenRun[], recorded = runs.length + broken.length): string[] {
+  if (!recorded) return ["no runs recorded yet"];
+  if (!runs.length && !broken.length) return ["no matching runs (sflow runs without filters lists all of them)"];
   const lines = runs.map(r => {
     const open = r.open.length ? `  open: ${r.open.map(o => `${o.step} ${o.status}`).join(", ")}` : "";
     return `${r.short}  ${stamp(r.createdAt)}  ${r.status}${r.driver === "live" ? " (driver running)" : ""}  ${r.name}  ${r.cwds.join(", ")}${open}`;

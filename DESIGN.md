@@ -68,3 +68,11 @@ The concurrency cap includes live blocked workers. Completed owned sessions are 
 ## MVP exclusions
 
 No GUI, automatic branch/repair loop, cron, cross-machine runtime creation, Desktop-hosted worker creation, automatic model routing, or automatic artifact merge. Future adapters can create sessions in other hosts while keeping the workflow engine and OCS message protocol unchanged.
+
+## User template expansion
+
+Templates are version-1 workflow-shaped data with role bindings and typed parameters. Only prompts and role instructions have single-pass placeholders. Step paths are relative to the invocation project and cannot escape it, including through symlinks. reviewFix uses the same bounded expansion as presets; planning acceptance is carried to every review. Expansion passes parseWorkflow before preflight.
+
+The start entrypoint alone merges CLI > project > global > template fields and records their sources. It requires per-invocation --write if any expanded step writes. Legacy init/run do not consult these files. Project config/templates live at the Git root (otherwise cwd); global config honors SFLOW_CONFIG_HOME/XDG_CONFIG_HOME. Files are atomically written and default-referenced templates cannot be removed accidentally.
+
+createRun stores optional origin with template hash, parameters and final role values/sources without changing run version. Resume uses the saved workflow, never current preferences. Public views expose template identity only; full parameters remain private. The conversational main agent handles user intent/acceptance; lead/plan roles are explicit steps, not extra schedulers. Native approval/lifecycle/proof semantics are unchanged.

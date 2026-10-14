@@ -12,7 +12,7 @@ export interface StepReview {
   worktree?: { path: string; branch?: string; exists: boolean; changes?: string[]; diffStat?: string };
   session: "open" | "closed";
 }
-export interface RunReview { runId: string; workflow: string; status: string; steps: StepReview[]; next: string[]; note: string }
+export interface RunReview { origin?: { template: string; scope: string; path: string; sha256: string }; runId: string; workflow: string; status: string; steps: StepReview[]; next: string[]; note: string }
 
 function since(ms: number) { const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`; }
 async function git(cwd: string, args: string[]) {
@@ -59,12 +59,13 @@ export async function reviewRun(run: Run, runtime: SessionRuntime): Promise<RunR
     if (review.worktree?.exists && step.worktree)
       next.push(`${step.id}: worktree kept at ${review.worktree.path}; review it (git -C <path> diff), then commit/merge yourself or remove it with git worktree remove`);
   }
-  return { runId: run.id, workflow: run.workflow.name, status: run.status, steps, next,
+  return { ...(run.origin ? { origin: { template: run.origin.template, scope: run.origin.scope, path: run.origin.path, sha256: run.origin.sha256 } } : {}), runId: run.id, workflow: run.workflow.name, status: run.status, steps, next,
     note: "reported = what the worker claimed (sflow verified the result file and hash only); worktree = what sflow observed with git. Review the actual diff and rerun checks before accepting." };
 }
 
 export function renderReview(r: RunReview): string[] {
   const lines = [`run ${r.runId} (${r.workflow}): ${r.status}`];
+  if (r.origin) lines.push(`  template ${r.origin.template} (${r.origin.scope}), from ${r.origin.path}`);
   for (const s of r.steps) {
     lines.push(`  ${s.id} — ${s.agent}${s.model ? ` (${s.model})` : ""}: ${s.status}${s.elapsed ? `, ${s.elapsed}` : ""}${s.session === "open" ? ", session still open" : ""}`);
     if (s.reported) {

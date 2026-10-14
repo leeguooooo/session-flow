@@ -5,7 +5,7 @@ import { dataHome, loadRun } from "./store";
 // Finding a run again without its UUID (#8). Everything here is read-only and comes from the
 // run records; nothing asks a worker's terminal, so step states are as last recorded.
 export interface RunEntry {
-  id: string; short: string; name: string; cwds: string[]; createdAt: number; status: string;
+  template?: string; id: string; short: string; name: string; cwds: string[]; createdAt: number; status: string;
   driver: "live" | "none"; open: { step: string; status: string }[];
 }
 export interface BrokenRun { id: string; error: string }
@@ -31,7 +31,7 @@ export function listRuns(): { runs: RunEntry[]; broken: BrokenRun[] } {
   for (const id of runIds()) {
     try {
       const run = loadRun(id);
-      runs.push({ id, short: id.slice(0, 8), name: run.workflow.name, cwds: [...new Set(run.workflow.steps.map(s => s.cwd))],
+      runs.push({ ...(run.origin ? { template: run.origin.template } : {}), id, short: id.slice(0, 8), name: run.workflow.name, cwds: [...new Set(run.workflow.steps.map(s => s.cwd))],
         createdAt: run.createdAt, status: run.status, driver: driverLive(run.dir) ? "live" : "none",
         open: Object.entries(run.steps).filter(([, s]) => !FINAL.has(s.status)).map(([step, s]) => ({ step, status: s.status })) });
     } catch (err) { broken.push({ id, error: (err as Error).message }); }
@@ -73,7 +73,7 @@ export function renderRuns(runs: RunEntry[], broken: BrokenRun[], recorded = run
   if (!runs.length && !broken.length) return ["no matching runs (sflow runs without filters lists all of them)"];
   const lines = runs.map(r => {
     const open = r.open.length ? `  open: ${r.open.map(o => `${o.step} ${o.status}`).join(", ")}` : "";
-    return `${r.short}  ${stamp(r.createdAt)}  ${r.status}${r.driver === "live" ? " (driver running)" : ""}  ${r.name}  ${r.cwds.join(", ")}${open}`;
+    return `${r.short}  ${stamp(r.createdAt)}  ${r.status}${r.driver === "live" ? " (driver running)" : ""}  ${r.name}${r.template ? ` [template ${r.template}]` : ""}  ${r.cwds.join(", ")}${open}`;
   });
   for (const b of broken) lines.push(`${b.id.slice(0, 8)}  unreadable record: ${b.error}`);
   lines.push("states are as recorded; sflow status <id> shows live prompts. Any unambiguous id prefix works.");

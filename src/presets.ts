@@ -12,15 +12,15 @@ export type Preset = keyof typeof PRESETS;
 
 export interface PresetOptions { task: string; cwd: string; write?: boolean; plan?: string; implement?: string; review?: string; agents?: string[]; join?: string; name?: string; rounds?: number }
 
-const IMPLEMENT = (task: string) => `Task: ${task}
+export const IMPLEMENT = (task: string) => `Task: ${task}
 Implement it in your isolated git worktree (your current working directory). Keep the change as small as the task allows and follow the project's conventions. Run the project's relevant checks. Do not commit, push or merge.
 Report done with: summary; details.workspace = absolute path of the worktree; artifacts = the files you changed; checks = [{"command": ..., "passed": true|false, "output": last lines}]. Report blocked if you cannot finish.`;
-const REVIEW = (task: string, after: string) => `Task under review: ${task}
+export const REVIEW = (task: string, after: string) => `Task under review: ${task}
 Find the worktree path in the ${after} dependency result (details.workspace). Inspect the actual change there yourself: git -C <path> status and git -C <path> diff. Rerun the key checks when you can do so without editing. Do not rely on the implementer's summary.
 Do not edit, commit or merge. Report done with findings (problems first, each with file and line), and whether the task is met; report blocked if the worktree or evidence is missing.`;
 
-const VERDICT = `End with a verdict in details.verdict: "pass" if the task is met with no problem that must be fixed first, otherwise "needs-fix" with the problems to fix listed first. Report it with: report done '<summary>' --detail verdict=pass (or verdict=needs-fix), adding --check for what you ran.`;
-const FIX = (task: string, review: string) => `Task: ${task}
+export const VERDICT = `End with a verdict in details.verdict: "pass" if the task is met with no problem that must be fixed first, otherwise "needs-fix" with the problems to fix listed first. Report it with: report done '<summary>' --detail verdict=pass (or verdict=needs-fix), adding --check for what you ran.`;
+export const FIX = (task: string, review: string) => `Task: ${task}
 A reviewer found problems in the change in this worktree (your current working directory). Read the ${review} dependency result and fix what it lists, nothing else. Keep the existing uncommitted changes; do not reset, stash or recreate the worktree. Rerun the relevant checks. Do not commit, push or merge.
 Report done with: summary of what you changed for each finding; details.workspace = absolute path of the worktree; checks with what you ran. Report blocked if a finding cannot be fixed as described.`;
 
@@ -55,23 +55,42 @@ export function buildPreset(preset: string, o: PresetOptions): Record<string, un
       prompt: `Task: ${o.task}\nCompare the dependency results. Report done with the findings they agree on, where they disagree and which side the evidence supports, and anything none of them checked. Verify a disputed point in the code yourself before deciding it. Do not edit files.` });
   } else {
     if (preset === "plan-implement-review") steps.push({ id: "plan", agent: agent(o.plan, "claude", "--plan"), cwd,
-      prompt: `Task: ${o.task}\nRead the relevant code and propose the smallest change that does it: files to touch, approach, and acceptance criteria someone can check. Do not edit files. Report done with the plan.` });
+      prompt: `Task: ${o.task}\nRead the relevant code and propose the smallest change that does it: files to touch, approach, and acceptance criteria someone can check. Do not edit files. Report done with the plan and --detail acceptance='<explicit acceptance criteria>'.` });
     steps.push({ id: "implement", agent: agent(o.implement, "codex", "--implement"), cwd, policy: "workspace-write", worktree: true,
       ...(steps.length ? { dependsOn: ["plan"] } : {}), prompt: IMPLEMENT(o.task) + (steps.length ? "\nFollow the plan in the plan dependency result." : "") });
-    if (preset !== "implement-review-fix") steps.push({ id: "review", agent: agent(o.review, "claude", "--review"), cwd, dependsOn: ["implement"], prompt: REVIEW(o.task, "implement") });
+    if (preset !== "implement-review-fix") steps.push({ id: "review", agent: agent(o.review, "claude", "--review"), cwd, dependsOn: steps.some(s => s.id === "plan") ? ["implement", "plan"] : ["implement"], prompt: REVIEW(o.task, "implement") + (steps.some(s => s.id === "plan") ? "\n" + ACCEPTANCE : "") });
     else {
       // Rounds are unrolled into distinct steps: each round has its own identity, so a late report
       // can never advance another round. A round that is not needed is skipped.
       const reviewer = agent(o.review, "claude", "--review"), fixer = agent(o.implement, "codex", "--implement");
-      steps.push({ id: "review-1", agent: reviewer, cwd, dependsOn: ["implement"], prompt: `${REVIEW(o.task, "implement")}\n${VERDICT}` });
-      for (let k = 1; k <= rounds; k++) {
-        steps.push({ id: `fix-${k}`, agent: fixer, cwd, policy: "workspace-write", workspace: "implement", dependsOn: [`review-${k}`],
-          when: { [`review-${k}`]: { "details.verdict": "needs-fix" } }, prompt: FIX(o.task, `review-${k}`) });
-        steps.push({ id: `review-${k + 1}`, agent: reviewer, cwd, dependsOn: [`review-${k}`, `fix-${k}`], when: { [`fix-${k}`]: { status: "done" } },
-          prompt: `${REVIEW(o.task, `fix-${k}`)}\nThe ${`review-${k}`} dependency result lists what the previous review asked to fix; check each item and look for new problems.\n${VERDICT}`,
-          ...(k === rounds ? { expect: { "details.verdict": "pass" } } : {}) });
-      }
+      steps.push(...expandReviewFix({ id: "review", agent: reviewer, cwd, dependsOn: ["implement"], prompt: REVIEW(o.task, "implement") },
+        { agent: fixer }, "implement", rounds, o.task));
     }
   }
   return { version: 1, name: o.name ?? preset, concurrency: preset === "fan-out" ? Math.min(steps.length - 1, 4) : 2, steps };
+}
+
+
+export const ACCEPTANCE = "Read plan.details.acceptance from the plan dependency. Verify every acceptance criterion against the actual diff and checks; include each criterion and its conclusion in your reported checks. Block if acceptance evidence is missing.";
+
+// The one expansion used by both legacy presets and user templates. Each round has its own
+// identity, and all non-implementation dependencies (including plan) reach every review.
+export function expandReviewFix(first: Record<string, unknown>, fixer: Record<string, unknown>, workspace: string, rounds: number, task: string): Record<string, unknown>[] {
+  const prefix = String(first.id), reviewId = (n: number) => `${prefix}-${n}`;
+  const fixId = (n: number) => prefix === "review" ? `fix-${n}` : `${prefix}-fix-${n}`;
+  const deps = first.dependsOn as string[], extra = deps.filter(d => d !== workspace);
+  const reviewIdentity = first.role ? { role: first.role } : { agent: first.agent };
+  const hasPlan = extra.includes("plan"), acceptance = hasPlan ? "\n" + ACCEPTANCE : "";
+  const steps: Record<string, unknown>[] = [{ ...first, id: reviewId(1), prompt: `${first.prompt}${acceptance}\n${VERDICT}` }];
+  for (let k = 1; k <= rounds; k++) {
+    steps.push({ id: fixId(k), ...fixer, cwd: first.cwd, policy: "workspace-write", workspace, dependsOn: [reviewId(k)],
+      when: { [reviewId(k)]: { "details.verdict": "needs-fix" } }, prompt: FIX(task, reviewId(k)) });
+    steps.push({ id: reviewId(k + 1), ...reviewIdentity, cwd: first.cwd,
+      dependsOn: [reviewId(k), fixId(k), ...extra], when: { [fixId(k)]: { status: "done" } },
+      prompt: `${REVIEW(task, fixId(k))}\nThe ${reviewId(k)} dependency result lists what the previous review asked to fix; check each item and look for new problems.${acceptance}\n${VERDICT}`,
+      ...(first.timeoutSeconds !== undefined ? { timeoutSeconds: first.timeoutSeconds } : {}),
+      ...(first.readyTimeoutSeconds !== undefined ? { readyTimeoutSeconds: first.readyTimeoutSeconds } : {}),
+      ...(k === rounds ? { expect: { "details.verdict": "pass" } } : {}) });
+  }
+  return steps;
 }

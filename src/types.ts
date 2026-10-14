@@ -47,8 +47,13 @@ export interface StepState {
   dependencyBytes?: number;
   fullDependencyBytes?: number;
 }
+export interface RunOrigin {
+  template: string; scope: "project" | "global" | "builtin"; path: string; sha256: string;
+  params: Record<string, Scalar>; roles: Record<string, { agent: Agent; model?: string; instructions?: string; sources: Record<string, string> }>;
+}
 export interface Run {
   version: 1 | 2;
+  origin?: RunOrigin;
   id: string;
   channel: string;
   dir: string;

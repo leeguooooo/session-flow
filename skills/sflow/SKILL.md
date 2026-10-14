@@ -26,6 +26,26 @@ and the OCS Pi extension, without calling a model; show the user any `FAIL`
 line and its fix. `sflow run` repeats the essential checks before creating
 anything. macOS/Linux only (WSL works).
 
+## Use a saved/default template
+
+For `/sflow <task>` or an explicit request to run a development/review workflow, prefer the user's template defaults. Do not launch paid workers for ordinary questions, brainstorming, or a request only to explain the product. A worker must follow its assignment instead and must never enter this driver flow.
+
+```sh
+sflow config show --cwd <project> --json
+sflow template list --cwd <project>
+sflow start --task "<task>" --cwd <project> --dry-run --json
+```
+
+Use `--template <name>` when requested. Writing templates need `--write` even for dry-run: add it only when the user explicitly asked for code changes (that request authorizes implementing, but not commit/merge). If no default is configured and the user did not name a template, ask which template to use (you can recommend dev/review/investigate based on the task). Explain that template use can save their choice as a project/global default, but never write config without their instruction. Do not choose a fallback template yourself. Never silently grant writes to a default.
+
+Show the resolved template, role agents/models, source paths and whether it writes code. On the first use of repository-sourced templates/config in a project, show that summary before execution. Existing task authorization is sufficient to run the displayed plan; do not ask a redundant permission question. Resolve missing required inputs with the user. Then repeat the same start command without `--dry-run --json`, keeping all overrides and the authorized `--write`. Native approvals still follow the user-choice procedure below.
+
+`template create <name> --from builtin:dev --project` saves a customizable workflow. Edit its roles/models/instructions/parameters/DAG; `template use project:<name> --project` makes it the project default. Global preferences use --global. `config set --role implement=codex --model review=sonnet --param rounds=2` saves overrides; `config show` and dry-run show sources. Fields resolve CLI > project > global > template. Explicit scope prefixes select a particular template; list marks shadowed names.
+
+Use `template show --json` to export, `create --from <file>` to import, `validate` for structure and start dry-run for actual expansion. Params can be supplied with repeated --param or --params-file. Only prompts/instructions substitute placeholders, once. See docs/templates.md for schema and management. run/init workflows below remain compatible and ignore new defaults.
+
+The current conversation's agent remains the main controller (clarification, approvals, actual diff/test acceptance). Template plan/lead/join roles are task steps, never another dispatcher. Run snapshots freeze the resolved workflow and origin; changing defaults must not change a resume.
+
 ## Write the workflow
 
 For a common shape, let sflow write it and show the user the plan it prints:

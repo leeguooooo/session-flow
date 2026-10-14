@@ -31,6 +31,20 @@ bun run bench:context
 
 Install and authenticate the agent CLIs your workflow uses (`claude`, `codex`, `pi`, `agy`), and install `tmux` and [OCS](https://github.com/leeguooooo/open-cross-session) 0.8.0 or newer. Only the agents named in your workflow are required. tmux hosts each step's native TUI in a private session, which is what makes `attach`, `logs`, Ctrl-C without stopping workers, and `resume` possible. `sflow run` checks every dependency before creating anything and lists what is missing with install commands. Install tmux with `brew install tmux` (macOS) or `sudo apt install tmux` (Debian/Ubuntu); `SFLOW_TMUX_BIN` and `SFLOW_OCS_BIN` point at binaries outside `PATH`. Windows is not supported yet (WSL works). This MVP works with released OCS 0.8.0 and does not require the newer send/dm JSON or whoami threadId additions. There is no npm registry distribution.
 
+## User templates and defaults
+
+Save a team workflow once, then supply only the task:
+
+```sh
+sflow template create my-dev --from builtin:dev --project
+sflow template use project:my-dev --project
+sflow config set --project --role implement=codex --model review=sonnet
+sflow start --task "Add a login screen" --write --dry-run --json
+sflow start --task "Add a login screen" --write
+```
+
+Templates support arbitrary workflow DAGs, per-role models/instructions, typed task parameters and bounded review/fix rounds. Explicit CLI fields override project defaults, then global defaults, then template fields. `start` shows each field's source; writing still requires `--write` for that task. Existing `init` and `run workflow.json` ignore defaults. See [the complete template guide](docs/templates.md) for management, scope resolution, import/export, parameter rules, skill use and frozen run snapshots.
+
 ## Run
 
 ```sh

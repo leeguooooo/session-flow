@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "name": "implement-review-fix",
+  "concurrency": 2,
+  "steps": [
+    {
+      "id": "implement",
+      "agent": "codex",
+      "cwd": "/PROJECT",
+      "policy": "workspace-write",
+      "worktree": true,
+      "prompt": "Task: snapshot-task\nImplement it in your isolated git worktree (your current working directory). Keep the change as small as the task allows and follow the project's conventions. Run the project's relevant checks. Do not commit, push or merge.\nReport done with: summary; details.workspace = absolute path of the worktree; artifacts = the files you changed; checks = [{\"command\": ..., \"passed\": true|false, \"output\": last lines}]. Report blocked if you cannot finish."
+    },
+    {
+      "id": "review-1",
+      "agent": "claude",
+      "cwd": "/PROJECT",
+      "dependsOn": [
+        "implement"
+      ],
+      "prompt": "Task under review: snapshot-task\nFind the worktree path in the implement dependency result (details.workspace). Inspect the actual change there yourself: git -C <path> status and git -C <path> diff. Rerun the key checks when you can do so without editing. Do not rely on the implementer's summary.\nDo not edit, commit or merge. Report done with findings (problems first, each with file and line), and whether the task is met; report blocked if the worktree or evidence is missing.\nEnd with a verdict in details.verdict: \"pass\" if the task is met with no problem that must be fixed first, otherwise \"needs-fix\" with the problems to fix listed first. Report it with: report done '<summary>' --detail verdict=pass (or verdict=needs-fix), adding --check for what you ran."
+    },
+    {
+      "id": "fix-1",
+      "agent": "codex",
+      "cwd": "/PROJECT",
+      "policy": "workspace-write",
+      "workspace": "implement",
+      "dependsOn": [
+        "review-1"
+      ],
+      "when": {
+        "review-1": {
+          "details.verdict": "needs-fix"
+        }
+      },
+      "prompt": "Task: snapshot-task\nA reviewer found problems in the change in this worktree (your current working directory). Read the review-1 dependency result and fix what it lists, nothing else. Keep the existing uncommitted changes; do not reset, stash or recreate the worktree. Rerun the relevant checks. Do not commit, push or merge.\nReport done with: summary of what you changed for each finding; details.workspace = absolute path of the worktree; checks with what you ran. Report blocked if a finding cannot be fixed as described."
+    },
+    {
+      "id": "review-2",
+      "agent": "claude",
+      "cwd": "/PROJECT",
+      "dependsOn": [
+        "review-1",
+        "fix-1"
+      ],
+      "when": {
+        "fix-1": {
+          "status": "done"
+        }
+      },
+      "prompt": "Task under review: snapshot-task\nFind the worktree path in the fix-1 dependency result (details.workspace). Inspect the actual change there yourself: git -C <path> status and git -C <path> diff. Rerun the key checks when you can do so without editing. Do not rely on the implementer's summary.\nDo not edit, commit or merge. Report done with findings (problems first, each with file and line), and whether the task is met; report blocked if the worktree or evidence is missing.\nThe review-1 dependency result lists what the previous review asked to fix; check each item and look for new problems.\nEnd with a verdict in details.verdict: \"pass\" if the task is met with no problem that must be fixed first, otherwise \"needs-fix\" with the problems to fix listed first. Report it with: report done '<summary>' --detail verdict=pass (or verdict=needs-fix), adding --check for what you ran."
+    },
+    {
+      "id": "fix-2",
+      "agent": "codex",
+      "cwd": "/PROJECT",
+      "policy": "workspace-write",
+      "workspace": "implement",
+      "dependsOn": [
+        "review-2"
+      ],
+      "when": {
+        "review-2": {
+          "details.verdict": "needs-fix"
+        }
+      },
+      "prompt": "Task: snapshot-task\nA reviewer found problems in the change in this worktree (your current working directory). Read the review-2 dependency result and fix what it lists, nothing else. Keep the existing uncommitted changes; do not reset, stash or recreate the worktree. Rerun the relevant checks. Do not commit, push or merge.\nReport done with: summary of what you changed for each finding; details.workspace = absolute path of the worktree; checks with what you ran. Report blocked if a finding cannot be fixed as described."
+    },
+    {
+      "id": "review-3",
+      "agent": "claude",
+      "cwd": "/PROJECT",
+      "dependsOn": [
+        "review-2",
+        "fix-2"
+      ],
+      "when": {
+        "fix-2": {
+          "status": "done"
+        }
+      },
+      "prompt": "Task under review: snapshot-task\nFind the worktree path in the fix-2 dependency result (details.workspace). Inspect the actual change there yourself: git -C <path> status and git -C <path> diff. Rerun the key checks when you can do so without editing. Do not rely on the implementer's summary.\nDo not edit, commit or merge. Report done with findings (problems first, each with file and line), and whether the task is met; report blocked if the worktree or evidence is missing.\nThe review-2 dependency result lists what the previous review asked to fix; check each item and look for new problems.\nEnd with a verdict in details.verdict: \"pass\" if the task is met with no problem that must be fixed first, otherwise \"needs-fix\" with the problems to fix listed first. Report it with: report done '<summary>' --detail verdict=pass (or verdict=needs-fix), adding --check for what you ran.",
+      "expect": {
+        "details.verdict": "pass"
+      }
+    }
+  ]
+}

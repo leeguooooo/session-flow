@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync, openSync
 import { randomBytes, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve, basename, dirname } from "node:path";
-import type { Run, Workflow } from "./types";
+import type { Run, Workflow, RunOrigin } from "./types";
 
 export function dataHome(): string { return resolve(process.env.SFLOW_HOME ?? join(homedir(), ".local/state/session-flow")); }
 export function atomicWrite(path: string, value: unknown) {
@@ -11,7 +11,7 @@ export function atomicWrite(path: string, value: unknown) {
   try { writeFileSync(fd, JSON.stringify(value, null, 2) + "\n"); fsyncSync(fd); } finally { closeSync(fd); }
   renameSync(temp, path);
 }
-export function createRun(workflow: Workflow): Run {
+export function createRun(workflow: Workflow, origin?: RunOrigin): Run {
   const id = randomUUID();
   const dir = join(dataHome(), "runs", id);
   mkdirSync(dir, { recursive: true, mode: 0o700 }); chmodSync(dir, 0o700);
@@ -20,7 +20,7 @@ export function createRun(workflow: Workflow): Run {
   const socketDir = join(process.env.TMPDIR ?? "/tmp", `sf-${id.slice(0, 12)}`);
   mkdirSync(socketDir, { mode: 0o700 });
   const run: Run = { version: 2, id, dir, socket: join(socketDir, "tmux.sock"), channel: `sflow-${id}`,
-    workflow, createdAt: Date.now(), status: "running", steps: Object.fromEntries(workflow.steps.map(s => [s.id,
+    workflow, ...(origin ? { origin } : {}), createdAt: Date.now(), status: "running", steps: Object.fromEntries(workflow.steps.map(s => [s.id,
       { status: "pending", token: randomBytes(24).toString("hex"), session: `sf-${s.id}` }])) };
   saveRun(run); return run;
 }

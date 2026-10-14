@@ -20,6 +20,7 @@ import { reviewRun, renderReview } from "./review";
 import { doctor, renderChecks } from "./doctor";
 import { buildPreset, PRESETS } from "./presets";
 import { maybeNotice, runUpdateCheck, upgrade, UPDATE_CHECK_COMMAND } from "./upgrade";
+import { templateCommand, configCommand, startPlan, describePlan, originSummary } from "./template-cli";
 import pkg from "../package.json";
 
 const cli = import.meta.path.includes("$bunfs") ? [process.execPath] : [process.execPath, import.meta.path];
@@ -27,7 +28,7 @@ const transport = new OcsTransport(), runtime = new TmuxRuntime(cli);
 const args = process.argv.slice(2);
 function print(value: unknown) { console.log(JSON.stringify(value, null, 2)); }
 function publicRun(run: ReturnType<typeof loadRun>, full = false) {
-  return { version: run.version, id: run.id, name: run.workflow.name, status: run.status, channel: run.channel,
+  return { version: run.version, id: run.id, name: run.workflow.name, status: run.status, channel: run.channel, ...(run.origin ? { origin: originSummary(run.origin) } : {}),
     steps: Object.fromEntries(Object.entries(run.steps).map(([id, { token: _, result, ...state }]) => [id, {
       ...state, ...(result ? { result: full ? result : { status: result.status, summary: String(result.summary ?? "").slice(0, 384),
         readFullResult: `sflow result ${run.id} ${id}` } } : {}),
@@ -67,6 +68,11 @@ async function main() {
   if (!cmd || cmd === "help" || cmd === "--help") {
     console.log(`Session Flow ${pkg.version} — native agent sessions, connected by OCS
 
+sflow start --task "…" [--template name] [--cwd dir] [--write] [--dry-run] [--json]
+                                     use a reusable template (project/global defaults); --role r=agent,
+                                     --model r=name, --param k=v, --params-file file
+sflow template <command>             list/show/create/validate/use/clear-default/remove
+sflow config show|set|clear           inspect or change role/model/parameter defaults
 sflow doctor [workflow.json] [--json] check tmux, ocs, agent CLIs and their sign-in (no model calls)
 sflow init <preset> --task "…"       write a workflow for a common shape (review, implement-review,
                                      plan-implement-review, fan-out); run "sflow init" to list them
@@ -138,6 +144,19 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
     const checks = await doctor({ tmux: runtime.binary, ocs: transport.binary, agents });
     if (json) print(checks); else console.log(renderChecks(checks).join("\n"));
     if (checks.some(c => c.level === "fail")) process.exitCode = 1; return;
+  }
+  if (cmd === "template") { templateCommand(args.slice(1)); return; }
+  if (cmd === "config") { configCommand(args.slice(1)); return; }
+  if (cmd === "start") {
+    const { plan, dryRun, json, progress } = startPlan(args.slice(1));
+    if (!json) for (const line of describePlan(plan)) console.error(line);
+    if (dryRun) { print({ dryRun: true, ...plan }); return; }
+    if (process.platform === "win32") throw new Error("tmux adapter requires macOS/Linux");
+    await preflight(requiredTools(runtime.binary, transport.binary, plan.workflow.steps.map(s => s.agent)));
+    const run = createRun(plan.workflow, plan.origin); print({ runId: run.id, channel: run.channel, origin: originSummary(plan.origin) });
+    const unlock = lockRun(run);
+    try { await driveWatched(run, progress as ProgressMode); } finally { unlock(); }
+    print(publicRun(run)); if (run.status !== "done") { console.error(`Answer any prompt in sflow status (or logs/attach), then: sflow resume ${run.id}`); process.exitCode = 2; } return;
   }
   if (cmd === "task") { if (arg) throw new Error("task takes no arguments"); print(await workerTask(transport)); return; }
   if (cmd === "report") {

@@ -28,7 +28,7 @@ function publicRun(run: ReturnType<typeof loadRun>, full = false) {
 async function main() {
   const [cmd, arg, ...rest] = args;
   if (!cmd || cmd === "help" || cmd === "--help") {
-    console.log(`Session Flow 0.1.1 — native agent sessions, connected by OCS
+    console.log(`Session Flow 0.1.2 — native agent sessions, connected by OCS
 
 sflow validate <workflow.json>       validate without starting agents
 sflow run <workflow.json>            create workers and drive the workflow
@@ -48,7 +48,7 @@ Claude/Codex authenticate through their own CLIs. No orcr or Herdr required.
 Native tmux adapter currently supports macOS/Linux. Ctrl-C stops the driver,
 leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
   }
-  if (cmd === "version") { console.log("0.1.1"); return; }
+  if (cmd === "version") { console.log("0.1.2"); return; }
   if (cmd === "task") { if (arg) throw new Error("task takes no arguments"); print(await workerTask(transport)); return; }
   if (cmd === "report") {
     if (!["--file", "--json"].includes(arg) || rest.length !== 1) throw new Error("report --file <result.json> or --json '<JSON>'");

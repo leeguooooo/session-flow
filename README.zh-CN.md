@@ -18,7 +18,7 @@ https://github.com/user-attachments/assets/87ca55f0-c839-41f6-ac16-4725542c7e24
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/session-flow/main/install.sh | sh
 ```
 
-安装脚本同时会给 Claude Code、Codex、Pi 和 agy（`~/.gemini/config/skills`）装上 `sflow` 技能，之后可以直接让 agent 写并运行工作流（Claude Code 里用 `/sflow`，Pi 里用 `/skill:sflow`）。技能内置在二进制里；`sflow skill install` 可重新安装，设置 `SFLOW_INSTALL_SKILLS=0` 则跳过。
+安装脚本同时会给 Claude Code、Codex、Pi 和 agy（`~/.gemini/config/skills`）装上 `sflow` 技能，之后可以直接让 agent 写并运行工作流（Claude Code 里用 `/sflow`，Pi 里用 `/skill:sflow`）。技能内置在二进制里；`sflow skill install` 可重新安装，设置 `SFLOW_INSTALL_SKILLS=0` 则跳过。`sflow upgrade` 安装最新版并刷新技能（`--check` 只查看不改动）；有新版时，其他命令每天最多在 stderr 提示一行（设 `SFLOW_NO_UPDATE_CHECK=1` 关闭）。它也在 [use-family](https://github.com/leeguooooo/plugins) 的 Claude Code 插件里：`/plugin install sflow@leeguooooo-plugins`。
 
 如果想从源码构建：
 

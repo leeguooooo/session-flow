@@ -13,6 +13,8 @@ import { runMetrics } from "./metrics";
 import { resolveResult } from "./results";
 import { preflight, requiredTools } from "./preflight";
 import { installSkill } from "./skill";
+import { maybeNotice, runUpdateCheck, upgrade, UPDATE_CHECK_COMMAND } from "./upgrade";
+import pkg from "../package.json";
 
 const cli = import.meta.path.includes("$bunfs") ? [process.execPath] : [process.execPath, import.meta.path];
 const transport = new OcsTransport(), runtime = new TmuxRuntime(cli);
@@ -28,8 +30,9 @@ function publicRun(run: ReturnType<typeof loadRun>, full = false) {
 }
 async function main() {
   const [cmd, arg, ...rest] = args;
+  maybeNotice(pkg.version, cmd, cli);
   if (!cmd || cmd === "help" || cmd === "--help") {
-    console.log(`Session Flow 0.1.5 — native agent sessions, connected by OCS
+    console.log(`Session Flow ${pkg.version} — native agent sessions, connected by OCS
 
 sflow validate <workflow.json>       validate without starting agents
 sflow run <workflow.json>            create workers and drive the workflow
@@ -44,13 +47,20 @@ sflow task                          worker: read assignment and report acceptanc
 sflow report --file <result.json>    worker: report done/blocked/failed
 sflow report --json '<JSON>'         worker: report without writing a file
 sflow skill install                 install the sflow skill for Claude Code, Codex, Pi and agy
+sflow upgrade [--check|--json]       install the latest release and refresh the skill
 sflow version
 
 Claude/Codex authenticate through their own CLIs. No orcr or Herdr required.
 Native tmux adapter currently supports macOS/Linux. Ctrl-C stops the driver,
 leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
   }
-  if (cmd === "version") { console.log("0.1.5"); return; }
+  if (cmd === "version" || cmd === "--version") { console.log(pkg.version); return; }
+  if (cmd === UPDATE_CHECK_COMMAND) { await runUpdateCheck(); return; }
+  if (cmd === "upgrade") {
+    const flags = args.slice(1);
+    if (flags.length > 1 || (flags[0] && !["--check", "--json"].includes(flags[0]))) throw new Error("upgrade [--check|--json]");
+    process.exitCode = await upgrade(pkg.version, flags[0] === "--check" ? "check" : flags[0] === "--json" ? "json" : "install"); return;
+  }
   if (cmd === "skill") {
     if (arg !== "install" || rest.length) throw new Error("skill install");
     for (const path of installSkill()) console.log(`installed ${path}`); return;

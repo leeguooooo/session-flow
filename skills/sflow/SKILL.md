@@ -102,3 +102,14 @@ agent did each step, and anything still waiting for the user.
 
 Run records live in `~/.local/state/session-flow/runs/<id>` and may contain
 private task text; keep them out of git.
+
+## Upgrade
+
+When any `sflow` command prints `sflow X is available`, tell the user and offer
+to run `sflow upgrade` (it updates the CLI and this skill). Check without
+changing anything: `sflow upgrade --check`. The user may also just say
+"升级 sflow" / "upgrade sflow".
+
+If the skill came from somewhere `upgrade` can't refresh:
+- Claude Code plugin: `claude plugin update sflow@leeguooooo-plugins`
+- Whole family: `curl -fsSL https://raw.githubusercontent.com/leeguooooo/plugins/main/upgrade-use-family.sh | sh`

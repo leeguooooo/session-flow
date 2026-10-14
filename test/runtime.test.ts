@@ -9,6 +9,11 @@ import { cleanEnv, command } from "../src/process";
 
 const cleanup: string[] = [];
 const oldPath = process.env.PATH;
+// The fake agent writes its argv after tmux starts it; wait for the file instead of a fixed sleep.
+async function readWhenWritten(path: string): Promise<string> {
+  for (let i = 0; i < 100; i++) { try { const text = readFileSync(path, "utf8"); if (text) return text; } catch {} await Bun.sleep(50); }
+  return readFileSync(path, "utf8");
+}
 afterEach(() => { process.env.PATH = oldPath; delete process.env.SFLOW_HOME; for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 test("inherited runtime identity is removed without discarding auth/config", () => {
   const keys = { TMUX: "existing", TMUX_PANE: "%1", CLAUDECODE: "1", CODEX_THREAD_ID: "parent", SFLOW_TOKEN: "parent", CODEX_HOME: "/config" };
@@ -31,7 +36,7 @@ test.skipIf(!Bun.which("tmux"))("real tmux sessions forward model safely and iso
     for (const step of run.workflow.steps) {
       expect(await rt.exists(run, step.id)).toBe(true);
       const pid = (await command(["tmux", "-S", run.socket, "display-message", "-p", "-t", run.steps[step.id].session, "#{pane_pid}"])).stdout.trim();
-      const argv = readFileSync(join(run.steps[step.id].cwd!, `argv-${pid}.txt`), "utf8");
+      const argv = await readWhenWritten(join(run.steps[step.id].cwd!, `argv-${pid}.txt`));
       expect(argv).toContain("model;$(touch should-not-exist)"); expect(argv).not.toContain("dangerously");
       const wrapper = readFileSync(join(run.dir, step.id, "worker"), "utf8");
       expect(wrapper).toContain(`SFLOW_STEP_ID='${step.id}'`);
@@ -62,7 +67,7 @@ test.skipIf(!Bun.which("tmux"))("pi and agy start their native TUIs with the ste
     await Bun.sleep(150);
     const argv = async (id: string) => {
       const pid = (await command(["tmux", "-S", run.socket, "display-message", "-p", "-t", run.steps[id].session, "#{pane_pid}"])).stdout.trim();
-      return readFileSync(join(run.steps[id].cwd!, `argv-${pid}.txt`), "utf8").split("\n");
+      return (await readWhenWritten(join(run.steps[id].cwd!, `argv-${pid}.txt`))).split("\n");
     };
     const p = await argv("p"), a = await argv("a");
     expect(p.slice(0, 5)).toEqual(["--exclude-tools", "edit,write", "--model", "provider/model", "--"]);

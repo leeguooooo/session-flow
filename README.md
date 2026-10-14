@@ -43,7 +43,7 @@ sflow start --task "Add a login screen" --write --dry-run --json
 sflow start --task "Add a login screen" --write
 ```
 
-Templates support arbitrary workflow DAGs, per-role models/instructions, typed task parameters and bounded review/fix rounds. Explicit CLI fields override project defaults, then global defaults, then template fields. `start` shows each field's source; writing still requires `--write` for that task. Existing `init` and `run workflow.json` ignore defaults. See [the complete template guide](docs/templates.md) for management, scope resolution, import/export, parameter rules, skill use and frozen run snapshots.
+There is no implicit default: until you run `template use`, `start` needs `--template <name>` (for example `--template builtin:dev`) and lists the available templates when it is missing. Templates support arbitrary workflow DAGs, per-role models/instructions, typed task parameters and bounded review/fix rounds. Explicit CLI fields override project defaults, then global defaults, then template fields. `start` shows each field's source; writing still requires `--write` for that task. Existing `init` and `run workflow.json` ignore defaults. See [the complete template guide](docs/templates.md) for management, scope resolution, import/export, parameter rules, skill use and frozen run snapshots.
 
 ## Run
 

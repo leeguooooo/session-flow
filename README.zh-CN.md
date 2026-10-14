@@ -22,7 +22,7 @@ sflow start --task "增加登录页面" --write --dry-run --json
 sflow start --task "增加登录页面" --write
 ```
 
-模板支持任意现有 DAG、角色模型和提示词、类型参数及审查修复轮次。字段优先级是本次 CLI、项目配置、全局配置、模板自带；启动展示每个字段来源。写模板每次仍需 --write，旧 init/run 不读取新默认。管理、参数规则、导入导出和 skill 自动套用见[完整说明](docs/templates.zh-CN.md)。
+没有隐式默认模板：执行 `template use` 之前，`start` 必须带 `--template <名称>`（例如 `--template builtin:dev`），漏写时会列出可用模板。模板支持任意现有 DAG、角色模型和提示词、类型参数及审查修复轮次。字段优先级是本次 CLI、项目配置、全局配置、模板自带；启动展示每个字段来源。写模板每次仍需 --write，旧 init/run 不读取新默认。管理、参数规则、导入导出和 skill 自动套用见[完整说明](docs/templates.zh-CN.md)。
 
 ## 安装
 

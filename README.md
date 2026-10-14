@@ -18,7 +18,7 @@ GitHub Release binaries are installed with:
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/session-flow/main/install.sh | sh
 ```
 
-The installer also installs the `sflow` skill for Claude Code, Codex and Pi, so you can ask an agent to write and run a workflow (`/sflow` in Claude Code, `/skill:sflow` in Pi). The skill is embedded in the binary; `sflow skill install` reinstalls it, and `SFLOW_INSTALL_SKILLS=0` skips it.
+The installer also installs the `sflow` skill for Claude Code, Codex, Pi and agy (`~/.gemini/config/skills`), so you can ask an agent to write and run a workflow (`/sflow` in Claude Code, `/skill:sflow` in Pi). The skill is embedded in the binary; `sflow skill install` reinstalls it, and `SFLOW_INSTALL_SKILLS=0` skips it.
 
 To build from source instead:
 

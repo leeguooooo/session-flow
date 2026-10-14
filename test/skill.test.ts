@@ -4,12 +4,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SKILL_MD, installSkill, skillPaths } from "../src/skill";
 
-test("skill installs for Claude Code, Codex and Pi", () => {
+test("skill installs for Claude Code, Codex, Pi and agy", () => {
   const home = mkdtempSync(join(tmpdir(), "sf-skill-"));
   try {
     expect(SKILL_MD).toStartWith("---\nname: sflow\n");
     const paths = skillPaths({}, home);
-    expect(paths).toEqual([join(home, ".claude/skills/sflow/SKILL.md"), join(home, ".codex/skills/sflow/SKILL.md"), join(home, ".pi/agent/skills/sflow/SKILL.md")]);
+    expect(paths).toEqual([join(home, ".claude/skills/sflow/SKILL.md"), join(home, ".codex/skills/sflow/SKILL.md"), join(home, ".pi/agent/skills/sflow/SKILL.md"), join(home, ".gemini/config/skills/sflow/SKILL.md")]);
     expect(skillPaths({ PI_CODING_AGENT_DIR: join(home, "pi") }, home)[2]).toBe(join(home, "pi/skills/sflow/SKILL.md"));
     // An outdated copy reached through a symlink is replaced without touching the link's target.
     const shared = join(home, "shared.md"); writeFileSync(shared, "old");

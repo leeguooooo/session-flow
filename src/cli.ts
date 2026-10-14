@@ -29,7 +29,7 @@ function publicRun(run: ReturnType<typeof loadRun>, full = false) {
 async function main() {
   const [cmd, arg, ...rest] = args;
   if (!cmd || cmd === "help" || cmd === "--help") {
-    console.log(`Session Flow 0.1.4 — native agent sessions, connected by OCS
+    console.log(`Session Flow 0.1.5 — native agent sessions, connected by OCS
 
 sflow validate <workflow.json>       validate without starting agents
 sflow run <workflow.json>            create workers and drive the workflow
@@ -43,14 +43,14 @@ sflow stop <run-id>                  stop only this run's workers; retain artifa
 sflow task                          worker: read assignment and report acceptance
 sflow report --file <result.json>    worker: report done/blocked/failed
 sflow report --json '<JSON>'         worker: report without writing a file
-sflow skill install                 install the sflow skill for Claude Code, Codex and Pi
+sflow skill install                 install the sflow skill for Claude Code, Codex, Pi and agy
 sflow version
 
 Claude/Codex authenticate through their own CLIs. No orcr or Herdr required.
 Native tmux adapter currently supports macOS/Linux. Ctrl-C stops the driver,
 leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
   }
-  if (cmd === "version") { console.log("0.1.4"); return; }
+  if (cmd === "version") { console.log("0.1.5"); return; }
   if (cmd === "skill") {
     if (arg !== "install" || rest.length) throw new Error("skill install");
     for (const path of installSkill()) console.log(`installed ${path}`); return;

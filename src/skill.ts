@@ -8,7 +8,9 @@ export { SKILL_MD };
 
 export function skillPaths(env: NodeJS.ProcessEnv = process.env, home = homedir()): string[] {
   const pi = env.PI_CODING_AGENT_DIR && isAbsolute(env.PI_CODING_AGENT_DIR) ? env.PI_CODING_AGENT_DIR : join(home, ".pi", "agent");
-  return [join(home, ".claude", "skills", "sflow", "SKILL.md"), join(home, ".codex", "skills", "sflow", "SKILL.md"), join(pi, "skills", "sflow", "SKILL.md")];
+  // agy loads global skills from ~/.gemini/config/skills (its agy-customizations guide).
+  return [join(home, ".claude", "skills", "sflow", "SKILL.md"), join(home, ".codex", "skills", "sflow", "SKILL.md"), join(pi, "skills", "sflow", "SKILL.md"),
+    join(home, ".gemini", "config", "skills", "sflow", "SKILL.md")];
 }
 
 // The skill ships inside the binary so it always matches the installed sflow.

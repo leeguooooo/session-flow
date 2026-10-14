@@ -8,6 +8,7 @@ import { OcsTransport } from "./ocs";
 import { TmuxRuntime } from "./runtime";
 import { drive, reconcile } from "./engine";
 import { workerTask, workerReport, plainReport } from "./worker";
+import { listRuns, filterRuns, renderRuns, resolveRunId } from "./runs";
 import { checked } from "./process";
 import { runMetrics } from "./metrics";
 import { resolveResult } from "./results";
@@ -53,6 +54,7 @@ async function driveWatched(run: ReturnType<typeof loadRun>, mode: ProgressMode)
   if (mode === "text") for (const line of renderReview(await reviewRun(run, runtime))) console.error(line);
   else if (mode === "json") console.error(JSON.stringify({ type: "review", ...await reviewRun(run, runtime) }));
 }
+const RUN_COMMANDS = new Set(["status", "stats", "result", "attach", "logs", "answer", "review", "resume", "stop"]);
 async function main() {
   const [cmd, arg, ...rest] = args;
   maybeNotice(pkg.version, cmd, cli);
@@ -74,7 +76,9 @@ sflow run <workflow.json> [--progress text|json|none]
                                      typed numbers answer a worker's trust/approval prompt
 sflow resume <run-id> [--progress …]  reconcile and continue; never recreate uncertain workers
 sflow review <run-id> [--json]        what each step reported, what sflow saw, what is left to do
+sflow runs [--cwd dir] [--status s] [--json]  list recent runs (newest first) to find a run id
 sflow status <run-id>                reconcile explicit worker reports, print JSON
+                                     (any command taking <run-id> accepts an unambiguous prefix)
 sflow stats <run-id>                 message counts and context bytes (not tokens)
 sflow result <run-id> <step-id>       read one complete result on demand
 sflow attach <run-id> <step-id>       inspect/interact with one owned native session
@@ -153,8 +157,27 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
     try { await driveWatched(run, mode); } finally { unlock(); }
     print(publicRun(run)); if (run.status !== "done") { console.error(`Answer any prompt in sflow status (or logs/attach), then: sflow resume ${run.id}`); process.exitCode = 2; } return;
   }
-  if (!arg) throw new Error("run id required");
-  const run = loadRun(arg);
+  if (cmd === "runs") {
+    const flags = args.slice(1), opts: { cwd?: string; status?: string; limit?: number } = {};
+    let json = false;
+    for (let i = 0; i < flags.length; i++) {
+      const f = flags[i], v = flags[i + 1];
+      if (f === "--json") json = true;
+      else if (f === "--cwd" && v) { opts.cwd = v; i++; }
+      else if (f === "--status" && v) { opts.status = v; i++; }
+      else if (f === "--limit" && v && /^\d+$/.test(v)) { opts.limit = Number(v); i++; }
+      else throw new Error("runs [--cwd <dir>] [--status running|done|blocked|cancelled] [--limit n] [--json]");
+    }
+    const { runs, broken } = listRuns(), shown = filterRuns(runs, opts);
+    if (json) print({ runs: shown, broken, note: "step states are as recorded; sflow status <id> shows live prompts" });
+    else console.log(renderRuns(shown, broken).join("\n"));
+    return;
+  }
+  if (!RUN_COMMANDS.has(cmd)) throw new Error(`unknown command: ${cmd} (see sflow help)`);
+  if (!arg) throw new Error(`${cmd} needs a run id; find it with: sflow runs`);
+  const runId = resolveRunId(arg);
+  if (runId !== arg) console.error(`run ${runId}`);
+  const run = loadRun(runId);
   if (cmd === "result") {
     if (rest.length !== 1 || !run.steps[rest[0]]) throw new Error("valid step id required");
     reconcile(run, await transport.read(run.channel, `sflow-${run.id}`));

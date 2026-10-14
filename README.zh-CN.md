@@ -46,6 +46,7 @@ sflow run .sflow/implement-review.json
 在另一个终端或由 agent 调用：
 
 ```sh
+sflow runs [--cwd <目录>] [--json]   # 最近的运行，新的在前，用来找回 run ID
 sflow status <run-id>                # JSON；等待中的提示会出现在对应步骤上
 sflow answer <run-id> <step-id> <prompt-id> <n>
 sflow review <run-id> [--json]
@@ -54,6 +55,8 @@ sflow logs <run-id> <step-id>
 sflow attach <run-id> <step-id>
 sflow stats <run-id>
 ```
+
+`<run-id>` 可以只写不会混淆的前几位（`sflow status 8f75`）；匹配到多个时会全部列出，不会替你猜。
 
 从头到尾改一次真实代码（含 worktree 审查和故障恢复）：[docs/dev-workflow.zh-CN.md](docs/dev-workflow.zh-CN.md)。
 

@@ -92,6 +92,7 @@ terminal by the user accepts typed answers to prompts; one you start in the
 background does not, so answer through `sflow answer` as below. Then watch it:
 
 ```sh
+sflow runs [--cwd <project>]         # recent runs, newest first, when the run id is lost
 sflow status <run-id>                # per-step status and short summaries
 sflow result <run-id> <step-id>      # one complete, hash-verified result
 sflow logs <run-id> <step-id>        # what that worker's terminal shows now
@@ -100,7 +101,8 @@ sflow stats <run-id>                 # message counts and forwarded bytes
 sflow review <run-id>                # per step: what was reported, what sflow saw in worktrees, what is left
 ```
 
-Poll `status` at a sensible interval (a minute or more), not in a tight loop.
+Any `<run-id>` may be an unambiguous prefix; if several runs match, the error lists them: ask
+the user which one rather than picking. Poll `status` at a sensible interval (a minute or more), not in a tight loop.
 
 ## When a step is stuck
 

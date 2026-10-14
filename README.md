@@ -46,6 +46,7 @@ While it runs, `sflow run` prints each step's observed changes (starting, accept
 From another terminal or an agent:
 
 ```sh
+sflow runs [--cwd <dir>] [--json]    # recent runs, newest first, to find a run id
 sflow status <run-id>                # JSON; a waiting prompt appears on its step
 sflow answer <run-id> <step-id> <prompt-id> <n>
 sflow review <run-id> [--json]
@@ -54,6 +55,8 @@ sflow logs <run-id> <step-id>
 sflow attach <run-id> <step-id>
 sflow stats <run-id>
 ```
+
+Any `<run-id>` may be an unambiguous prefix (`sflow status 8f75`); several matches are listed, never guessed between.
 
 A real change from start to finish, with worktree review and recovery: [docs/dev-workflow.md](docs/dev-workflow.md).
 

@@ -16,6 +16,7 @@ import { installSkill } from "./skill";
 import { parseMenu, menuKeys } from "./prompt";
 import { Progress, describe, type ProgressMode } from "./progress";
 import { reviewRun, renderReview } from "./review";
+import { doctor, renderChecks } from "./doctor";
 import { maybeNotice, runUpdateCheck, upgrade, UPDATE_CHECK_COMMAND } from "./upgrade";
 import pkg from "../package.json";
 
@@ -57,6 +58,7 @@ async function main() {
   if (!cmd || cmd === "help" || cmd === "--help") {
     console.log(`Session Flow ${pkg.version} — native agent sessions, connected by OCS
 
+sflow doctor [workflow.json] [--json] check tmux, ocs, agent CLIs and their sign-in (no model calls)
 sflow validate <workflow.json>       validate without starting agents
 sflow run <workflow.json> [--progress text|json|none]
                                      create workers and drive the workflow; progress on stderr,
@@ -92,6 +94,15 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
   if (cmd === "skill") {
     if (arg !== "install" || rest.length) throw new Error("skill install");
     for (const path of installSkill()) console.log(`installed ${path}`); return;
+  }
+  if (cmd === "doctor") {
+    const list = args.slice(1), json = list.includes("--json");
+    const files = list.filter(a => a !== "--json");
+    if (files.length > 1) throw new Error("doctor [workflow.json] [--json]");
+    const agents = files[0] ? parseWorkflow(JSON.parse(readFileSync(resolve(files[0]), "utf8")), dirname(resolve(files[0]))).steps.map(s => s.agent) : undefined;
+    const checks = await doctor({ tmux: runtime.binary, ocs: transport.binary, agents });
+    if (json) print(checks); else console.log(renderChecks(checks).join("\n"));
+    if (checks.some(c => c.level === "fail")) process.exitCode = 1; return;
   }
   if (cmd === "task") { if (arg) throw new Error("task takes no arguments"); print(await workerTask(transport)); return; }
   if (cmd === "report") {

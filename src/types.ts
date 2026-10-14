@@ -12,7 +12,14 @@ export interface Step {
   timeoutSeconds: number;
   readyTimeoutSeconds: number;
   worktree?: boolean;
+  // Write in an ancestor write step's worktree instead of a new one (a fix after a review).
+  workspace?: string;
+  // Run only when each named dependency's result has these field values; otherwise "skipped".
+  when?: Record<string, Record<string, Scalar>>;
+  // A done report must carry these values, or the step ends blocked (the last review round).
+  expect?: Record<string, Scalar>;
 }
+export type Scalar = string | number | boolean;
 export interface Workflow {
   version: 1;
   name: string;
@@ -20,7 +27,7 @@ export interface Workflow {
   prefixWarmupMs?: number;
   steps: Step[];
 }
-export type StepStatus = "pending" | "dispatching" | "launching" | "starting" | "running" | "done" | "failed" | "blocked" | "uncertain" | "cancelled";
+export type StepStatus = "pending" | "dispatching" | "launching" | "starting" | "running" | "done" | "failed" | "blocked" | "uncertain" | "cancelled" | "skipped";
 export interface StepState {
   status: StepStatus;
   token: string;

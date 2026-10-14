@@ -12,8 +12,10 @@ function since(ms: number) { const s = Math.max(0, Math.round(ms / 1000)); retur
 export function describe(workflow: Workflow): string[] {
   const lines = [`workflow ${workflow.name}: ${workflow.steps.length} step(s), up to ${workflow.concurrency} at a time`];
   for (const s of workflow.steps) {
-    lines.push(`  ${s.id}: ${s.agent}${s.model ? ` (${s.model})` : ""}, ${s.policy === "workspace-write" ? "writes in a new git worktree of" : "read-only on"} ${s.cwd}` +
-      `${s.dependsOn.length ? `, after ${s.dependsOn.join(", ")}` : ""}`);
+    lines.push(`  ${s.id}: ${s.agent}${s.model ? ` (${s.model})` : ""}, ${s.workspace ? `writes in ${s.workspace}'s worktree of` : s.policy === "workspace-write" ? "writes in a new git worktree of" : "read-only on"} ${s.cwd}` +
+      `${s.dependsOn.length ? `, after ${s.dependsOn.join(", ")}` : ""}` +
+      `${s.when ? `, only if ${Object.entries(s.when).map(([d, f]) => `${d} ${Object.entries(f).map(([k, v]) => `${k}=${v}`).join(" ")}`).join(" and ")}` : ""}` +
+      `${s.expect ? `, must report ${Object.entries(s.expect).map(([k, v]) => `${k}=${v}`).join(" ")}` : ""}`);
   }
   return lines;
 }

@@ -10,7 +10,7 @@ export interface RunEntry {
 }
 export interface BrokenRun { id: string; error: string }
 
-const FINAL = new Set(["done", "failed", "blocked", "cancelled"]);
+const FINAL = new Set(["done", "failed", "blocked", "cancelled", "skipped"]);
 
 function runIds(): string[] {
   const dir = join(dataHome(), "runs");

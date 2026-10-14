@@ -13,7 +13,9 @@ Session Flow creates independent coding-agent sessions and advances a workflow w
 
 ## Lifecycle
 
-`pending → dispatching → launching → starting → running → done/failed/blocked`.
+`pending → dispatching → launching → starting → running → done/failed/blocked`, or `pending → skipped` when a step's `when` does not hold.
+
+Review → fix → review is unrolled into distinct steps (`review-1`, `fix-1`, `review-2`, …) gated by `when`, not a loop in the engine. Each round keeps its own token, proof and actor, so a late report from one round can never advance another, and the one-attempt, never-resend rules stay as they are. A skipped step counts as finished for its dependents and is shown to them as `{status: "skipped"}`. A `when` field the dependency did not report blocks the step rather than deciding either way; `expect` turns a `done` without the required values (the last review still saying `needs-fix`) into `blocked`, handing the decision to a person. `workspace: <step>` reuses an ancestor write step's worktree; validation requires every two writers of one worktree to be ordered by dependencies, which is the one-writer-at-a-time guarantee (no lock needed). Writing in the user's own checkout and keeping one worker session across rounds are not supported: a fix round is a new session that reads the worktree and the earlier reports.
 
 The driver persists dispatch intent before sending an assignment. After a crash it looks for exactly one matching task in OCS; it never blindly resends. Launch intent is durable before tmux creation. An existing session on this run's private socket is adopted; an absent session after uncertain creation is retained as `uncertain`, never recreated automatically.
 

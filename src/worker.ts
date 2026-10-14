@@ -60,12 +60,17 @@ export async function workerReport(transport: Transport, result: unknown) {
 }
 
 export function plainReport(status: string, rest: string[]) {
-  const [summary, ...flags] = rest, checks: string[] = [], artifacts: string[] = [];
+  const [summary, ...flags] = rest, checks: string[] = [], artifacts: string[] = [], details: Record<string, string> = {};
   if (!summary || summary.startsWith("--")) throw new Error(`report ${status} needs a summary`);
   for (let i = 0; i < flags.length; i += 2) {
     const value = flags[i + 1];
-    if (!["--check", "--artifact"].includes(flags[i]) || value === undefined) throw new Error("report flags: --check '<text>' or --artifact <path>");
+    if (!["--check", "--artifact", "--detail"].includes(flags[i]) || value === undefined) throw new Error("report flags: --check '<text>', --artifact <path> or --detail key=value");
+    if (flags[i] === "--detail") {
+      const m = /^([A-Za-z_][\w-]*)=(.*)$/s.exec(value);
+      if (!m) throw new Error("--detail takes key=value, e.g. --detail verdict=pass");
+      details[m[1]] = m[2]; continue;
+    }
     (flags[i] === "--check" ? checks : artifacts).push(value);
   }
-  return { status, summary, ...(checks.length ? { checks } : {}), ...(artifacts.length ? { artifacts } : {}) };
+  return { status, summary, ...(checks.length ? { checks } : {}), ...(artifacts.length ? { artifacts } : {}), ...(Object.keys(details).length ? { details } : {}) };
 }

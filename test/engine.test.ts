@@ -32,8 +32,8 @@ class FakeTransport implements Transport {
     if (this.failSend) throw new Error("unknown outcome");
     this.rows.push({ seq: this.rows.length + 1, body: JSON.stringify(body), from: as });
   }
-  report(run: Run, id: string, status: string, actor = actorFor(run, id), token = run.steps[id].token) {
-    const e = { type: "sflow.worker" as const, version: 1 as const, runId: run.id, stepId: id, actor, status: status as "done", result: { summary: id } };
+  report(run: Run, id: string, status: string, actor = actorFor(run, id), token = run.steps[id].token, extra: Record<string, unknown> = {}) {
+    const e = { type: "sflow.worker" as const, version: 1 as const, runId: run.id, stepId: id, actor, status: status as "done", result: { summary: id, ...extra } };
     this.rows.push({ seq: this.rows.length + 1, from: actor,
       body: JSON.stringify({ ...e, proof: eventProof(e, token) }) });
   }
@@ -237,4 +237,53 @@ test("an actor must match its step's agent; pi and agy actors are accepted", () 
   expect(run.steps.a.actor).toBe("pi-01a1386a-5b57-72eb-9178-7f54f0dd7686");
   expect(run.steps.b.actor).toBe(`agy-${run.id.slice(0, 8)}-b`);
   expect(run.steps.c.actor).toBe("claude-12345678");
+});
+
+// #9: a review decides whether a fix round runs; rounds are distinct steps, unneeded ones are skipped.
+const loop = [
+  { id: "impl", policy: "workspace-write", worktree: true },
+  { id: "review-1", agent: "claude", dependsOn: ["impl"] },
+  { id: "fix-1", policy: "workspace-write", workspace: "impl", dependsOn: ["review-1"], when: { "review-1": { "details.verdict": "needs-fix" } } },
+  { id: "review-2", agent: "claude", dependsOn: ["review-1", "fix-1"], when: { "fix-1": { status: "done" } }, expect: { "details.verdict": "pass" } },
+  { id: "after", agent: "claude", dependsOn: ["review-2"] },
+];
+async function finish(run: Run, rt: FakeRuntime, tr: FakeTransport, id: string, extra: Record<string, unknown> = {}) {
+  expect(rt.created.at(-1)).toBe(id);
+  tr.report(run, id, "accepted"); tr.report(run, id, "done", undefined, undefined, extra); await tick(run, rt, tr);
+}
+test("a passing review skips the fix round, and what depends on a skipped step still runs", async () => {
+  const run = setup(loop), rt = new FakeRuntime(), tr = new FakeTransport();
+  await tick(run, rt, tr); await finish(run, rt, tr, "impl"); await finish(run, rt, tr, "review-1", { details: { verdict: "pass" } });
+  expect(run.steps["fix-1"].status).toBe("skipped"); expect(run.steps["review-2"].status).toBe("skipped");
+  const task = JSON.parse(tr.rows.find(r => JSON.parse(r.body).stepId === "after" && JSON.parse(r.body).type === "sflow.task")!.body);
+  expect(task.dependencies).toEqual({ "review-2": { status: "skipped" } });
+  await finish(run, rt, tr, "after");
+  expect(run.status).toBe("done");
+  expect(rt.created).toEqual(["impl", "review-1", "after"]);
+});
+test("needs-fix runs the fix in the same worktree, then the next review; a last needs-fix goes to the user", async () => {
+  const run = setup(loop), rt = new FakeRuntime(), tr = new FakeTransport();
+  await tick(run, rt, tr); await finish(run, rt, tr, "impl"); await finish(run, rt, tr, "review-1", { details: { verdict: "needs-fix" } });
+  const fix = JSON.parse(tr.rows.find(r => JSON.parse(r.body).stepId === "fix-1" && JSON.parse(r.body).type === "sflow.task")!.body);
+  expect(fix.workspace).toBe(join(run.dir, "impl", "worktree"));
+  await finish(run, rt, tr, "fix-1"); await finish(run, rt, tr, "review-2", { details: { verdict: "needs-fix" } });
+  expect(run.steps["review-2"].status).toBe("blocked");
+  expect(run.steps["review-2"].error).toContain('details.verdict = "needs-fix", expected "pass"');
+  await tick(run, rt, tr);
+  expect(run.steps.after.status).toBe("blocked"); expect(run.status).toBe("blocked");
+});
+test("a review that gives no verdict stops the run instead of skipping the fix", async () => {
+  const run = setup(loop), rt = new FakeRuntime(), tr = new FakeTransport();
+  await tick(run, rt, tr); await finish(run, rt, tr, "impl"); await finish(run, rt, tr, "review-1");
+  expect(run.steps["fix-1"].status).toBe("blocked");
+  expect(run.steps["fix-1"].error).toContain("review-1 reported no details.verdict");
+});
+test("workspace reuse is only for an ancestor write step, and one worktree has one writer at a time", () => {
+  expect(() => setup([{ id: "a", policy: "workspace-write", worktree: true }, { id: "b", policy: "workspace-write", workspace: "a" }])).toThrow("must be one of its (indirect) dependencies");
+  expect(() => setup([{ id: "a" }, { id: "b", policy: "workspace-write", workspace: "a", dependsOn: ["a"] }])).toThrow("not a write step");
+  expect(() => setup([{ id: "a", policy: "workspace-write", worktree: true }, { id: "r", dependsOn: ["a"] },
+    { id: "b", policy: "workspace-write", workspace: "a", dependsOn: ["r"] }, { id: "c", policy: "workspace-write", workspace: "a", dependsOn: ["r"] }])).toThrow("write in the same worktree");
+  expect(() => setup([{ id: "a" }, { id: "b", dependsOn: ["a"], when: { x: { status: "done" } } }])).toThrow("direct dependency");
+  expect(() => setup([{ id: "a", policy: "workspace-write", worktree: true, workspace: "a" }])).toThrow("either worktree");
+  expect(setup(loop).workflow.steps.find(s => s.id === "fix-1")!.workspace).toBe("impl");
 });

@@ -39,7 +39,7 @@ sflow init implement-review --write --task "加一个 --verbose 参数"   # 也�
 sflow run .sflow/implement-review.json
 ```
 
-`sflow init` 按常见形态生成一份普通的工作流：`review`、`implement-review`、`plan-implement-review`（后两种要加 `--write`，因为会有 agent 在新的 git worktree 里改代码），或 `fan-out`（几个 agent 并行，最后一个汇总）。它会打印每步用的 agent、目录、依赖和写入策略；想换 agent 就改文件，或传 `--implement`/`--review`/`--agents`。其他形态就自己写工作流（见下文）；在 agent 对话里，`sflow` 技能会根据你的描述写好。
+`sflow init` 按常见形态生成一份普通的工作流：`review`、`implement-review`、`plan-implement-review`、`implement-review-fix`（后三种要加 `--write`，因为会有 agent 在新的 git worktree 里改代码），或 `fan-out`（几个 agent 并行，最后一个汇总）。`implement-review-fix --rounds N`（默认 2）先审查改动；审查结论是 `needs-fix` 时，实现者在同一个 worktree 里修，再审一遍，最多 N 轮。用不到的轮次显示为 `skipped`；最后一轮审查仍是 `needs-fix` 时，运行以 `blocked` 结束，交给你决定。它会打印每步用的 agent、目录、依赖和写入策略；想换 agent 就改文件，或传 `--implement`/`--review`/`--agents`。其他形态就自己写工作流（见下文）；在 agent 对话里，`sflow` 技能会根据你的描述写好。
 
 运行期间，`sflow run` 会打印每个步骤实际观察到的变化（启动、接单、完成、受阻），两分钟没动静会提醒一次。某个 worker 弹出信任、登录或审批提示时，问题和带编号的选项会直接显示在同一个终端里，输入数字回车就能回答。结束时会打印一份验收摘要：每步 worker 报告了什么（标明未经核实）、sflow 用 git 在 worktree 里实际看到了什么、还剩什么要处理。进度写到 stderr；stdout 仍是原来的 JSON（第一段是 run ID，最后一段是最终状态）。`--progress json` 改为输出 NDJSON 事件，`--progress none` 不输出进度。
 
@@ -95,7 +95,7 @@ sflow stats <run-id>
 }
 ```
 
-`model` 可选：不写就用该 CLI 配置的默认模型，也可以写你账号支持的任意模型。相对路径的 `cwd` 以工作流文件所在目录为基准解析。`dependsOn` 构成一张 DAG，互不依赖且已就绪的步骤会并发执行。默认 policy 是 `read-only`；要写文件必须设 `worktree: true`，并且项目得是至少有一个提交的 Git 仓库。默认执行超时 1800 秒，就绪超时 90 秒（分别对应 `timeoutSeconds` / `readyTimeoutSeconds`）。
+`model` 可选：不写就用该 CLI 配置的默认模型，也可以写你账号支持的任意模型。相对路径的 `cwd` 以工作流文件所在目录为基准解析。`dependsOn` 构成一张 DAG，互不依赖且已就绪的步骤会并发执行。默认 policy 是 `read-only`；要写文件必须设 `worktree: true`，并且项目得是至少有一个提交的 Git 仓库；或者用 `"workspace": "<步骤>"` 接着在前面某个写步骤的 worktree 里改（那个步骤必须是它的依赖；在同一个 worktree 里写的两个步骤必须有先后依赖）。`"when": {"<依赖>": {"details.verdict": "needs-fix"}}` 表示只有该依赖的结果里这些字段等于给定值时才执行，否则标为 `skipped`（对后续步骤算作已完成）；结果里缺这个字段时步骤会停下，不会猜。`"expect": {"details.verdict": "pass"}` 表示 `done` 报告里没有这些值就改判为 `blocked`。worker 用 `report done '<摘要>' --detail verdict=pass` 写入这类字段。默认执行超时 1800 秒，就绪超时 90 秒（分别对应 `timeoutSeconds` / `readyTimeoutSeconds`）。
 
 合成示例 [examples/smoke.json](examples/smoke.json) 覆盖了 Claude 做规划、Claude/Codex 并行干活、最后由 Codex 汇总这条链路，全程不改项目文件。[examples/mixed.json](examples/mixed.json) 用四种 agent 跑同一张图：Pi 规划，agy 和 Claude 并行，Codex 汇总。
 

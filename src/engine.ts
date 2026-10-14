@@ -4,10 +4,32 @@ import { existsSync } from "node:fs";
 import { buildTask, prefixGroup } from "./context";
 import { resolveResult } from "./results";
 import { nativeActor, validProof } from "./protocol";
-import type { Run, SessionRuntime, Transport, TaskEvent, Message, WorkerEvent } from "./types";
+import type { Run, SessionRuntime, Step, Transport, TaskEvent, Message, WorkerEvent } from "./types";
 
 const active = new Set(["dispatching", "launching", "starting", "running"]);
-const terminal = new Set(["done", "failed", "blocked", "uncertain", "cancelled"]);
+const terminal = new Set(["done", "failed", "blocked", "uncertain", "cancelled", "skipped"]);
+// A skipped step (its when did not hold) counts as finished for whatever comes after it.
+const finished = (status: string) => status === "done" || status === "skipped";
+export function field(value: unknown, path: string): unknown {
+  return path.split(".").reduce<unknown>((v, k) => v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>)[k] : undefined, value);
+}
+// The result a when/expect looks at: the full report, or { status: "skipped" } for a skipped step.
+function outcome(run: Run, id: string): Record<string, unknown> {
+  const s = run.steps[id];
+  return s.status === "skipped" ? { status: "skipped" } : { ...resolveResult(run, id, s.result!), status: s.status };
+}
+// Undecidable (a field the report left out) is not "false": the step stops for a person.
+export function decideWhen(run: Run, step: Step): { run: boolean } | { error: string } {
+  for (const [dep, want] of Object.entries(step.when ?? {})) {
+    const got = outcome(run, dep);
+    for (const [path, value] of Object.entries(want)) {
+      const actual = field(got, path);
+      if (actual === undefined && got.status !== "skipped") return { error: `${dep} reported no ${path}; cannot decide whether ${step.id} runs` };
+      if (actual !== value) return { run: false };
+    }
+  }
+  return { run: true };
+}
 export function parseBody(row: Message): unknown {
   try { return JSON.parse(row.body); } catch { return null; }
 }
@@ -24,7 +46,7 @@ export function reconcile(run: Run, rows: Message[]) {
       !nativeActor(e.actor, run.workflow.steps.find(s => s.id === e.stepId)?.agent, { runId: run.id, stepId: e.stepId })) continue;
     if (state.actor && state.actor !== e.actor) continue;
     // Only workers that this driver actually tried to create can report.
-    if (["pending", "dispatching", "cancelled"].includes(state.status)) continue;
+    if (["pending", "dispatching", "cancelled", "skipped"].includes(state.status)) continue;
     if (e.status === "accepted") {
       if (["done", "failed", "blocked"].includes(state.status) && state.result) continue;
       state.actor = e.actor; state.status = "running"; delete state.error;
@@ -38,6 +60,9 @@ export function reconcile(run: Run, rows: Message[]) {
       }
       state.status = e.status; state.result = e.result.fullResultFile ? e.result : result; delete state.error;
       state.finishedAt ??= row.ts && Number.isFinite(Date.parse(row.ts)) ? Date.parse(row.ts) : Date.now();
+      const expect = run.workflow.steps.find(s => s.id === e.stepId)?.expect;
+      const miss = e.status === "done" && expect ? Object.entries(expect).find(([path, value]) => field(result, path) !== value) : undefined;
+      if (miss) { state.status = "blocked"; state.error = `reported ${miss[0]} = ${JSON.stringify(field(result, miss[0]) ?? null)}, expected ${JSON.stringify(miss[1])}; over to you`; }
     }
   }
 }
@@ -45,7 +70,7 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
   if (existsSync(join(run.dir, "cancel.request"))) {
     for (const step of run.workflow.steps) {
       await runtime.stop(run, step.id);
-      if (run.steps[step.id].status !== "done") run.steps[step.id].status = "cancelled";
+      if (!finished(run.steps[step.id].status)) run.steps[step.id].status = "cancelled";
     }
     run.status = "cancelled"; saveRun(run); return;
   }
@@ -54,7 +79,7 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
   reconcile(run, rows); saveRun(run);
   for (const step of run.workflow.steps) {
     const s = run.steps[step.id];
-    if (s.status === "blocked" && s.error === "dependency did not complete successfully" && step.dependsOn.every(id => run.steps[id].status === "done")) {
+    if (s.status === "blocked" && s.error === "dependency did not complete successfully" && step.dependsOn.every(id => finished(run.steps[id].status))) {
       s.status = "pending"; delete s.error; saveRun(run);
     }
     if (s.status === "launching" || (s.status === "uncertain" && s.uncertainty === "launch")) {
@@ -93,10 +118,16 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
   for (const step of run.workflow.steps) {
     const s = run.steps[step.id];
     if (s.status !== "pending") continue;
-    if (step.dependsOn.some(id => terminal.has(run.steps[id].status) && run.steps[id].status !== "done")) {
+    if (step.dependsOn.some(id => terminal.has(run.steps[id].status) && !finished(run.steps[id].status))) {
       s.status = "blocked"; s.error = "dependency did not complete successfully"; saveRun(run); continue;
     }
-    if (!step.dependsOn.every(id => run.steps[id].status === "done")) continue;
+    if (!step.dependsOn.every(id => finished(run.steps[id].status))) continue;
+    if (step.when) {
+      let decision: ReturnType<typeof decideWhen>;
+      try { decision = decideWhen(run, step); } catch (e) { decision = { error: `dependency evidence unavailable: ${String(e)}` }; }
+      if ("error" in decision) { s.status = "blocked"; s.error = decision.error; saveRun(run); continue; }
+      if (!decision.run) { s.status = "skipped"; s.finishedAt = Date.now(); saveRun(run); continue; }
+    }
     const group = prefixGroup(step);
     // Let the first matching worker begin its response before a sibling is
     // launched. This only enables compatible caching; it never claims a hit.
@@ -108,7 +139,7 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
     if (occupied >= run.workflow.concurrency) break;
     // Completed steps keep their TUI alive for inspection, so stop those owned
     // processes before launching more: the cap applies to actual workers too.
-    for (const prev of run.workflow.steps) if (run.steps[prev.id].status === "done") await runtime.stop(run, prev.id);
+    for (const prev of run.workflow.steps) if (finished(run.steps[prev.id].status)) await runtime.stop(run, prev.id);
     const assignments = rows.filter(r => r.from === sender && isTask(parseBody(r), run, step.id));
     if (assignments.length > 1) { s.status = "uncertain"; s.error = "duplicate assignments found"; saveRun(run); continue; }
     if (!assignments.length) {
@@ -128,7 +159,7 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
     catch (e) { s.status = "uncertain"; s.uncertainty = "launch"; s.error = String(e); }
     saveRun(run);
   }
-  if (Object.values(run.steps).every(s => s.status === "done")) {
+  if (Object.values(run.steps).every(s => finished(s.status))) {
     run.status = "done";
     for (const step of run.workflow.steps) await runtime.stop(run, step.id);
   } else if (!Object.values(run.steps).some(s => active.has(s.status))) run.status = "blocked";

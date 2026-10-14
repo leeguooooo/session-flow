@@ -88,7 +88,7 @@ sflow logs <run-id> <step-id>         capture its terminal output
 sflow stop <run-id>                  stop only this run's workers; retain artifacts
 sflow task                          worker: read assignment and report acceptance
 sflow report --file <result.json>    worker: report done/blocked/failed
-sflow report done '<summary>' [--check …] [--artifact …]   worker: report (or failed/blocked)
+sflow report done '<summary>' [--check …] [--artifact …] [--detail k=v]  worker: report (or failed/blocked)
 sflow report --json '<JSON>'         worker: report without writing a file
 sflow skill install                 install the sflow skill for Claude Code, Codex, Pi and agy
 sflow upgrade [--check|--json]       install the latest release and refresh the skill
@@ -112,14 +112,15 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
   if (cmd === "init") {
     const list = args.slice(2);
     if (!arg || arg.startsWith("--")) {
-      console.log(`sflow init <preset> --task "<what to do>" [--cwd <project>] [options]\n\npresets:\n${Object.entries(PRESETS).map(([k, v]) => `  ${k.padEnd(22)} ${v}`).join("\n")}\n\noptions: --write (required for presets that change code), --plan/--implement/--review/--join <agent>, --agents a,b, --name <name>, --out <file>, --print, --force`);
+      console.log(`sflow init <preset> --task "<what to do>" [--cwd <project>] [options]\n\npresets:\n${Object.entries(PRESETS).map(([k, v]) => `  ${k.padEnd(22)} ${v}`).join("\n")}\n\noptions: --write (required for presets that change code), --plan/--implement/--review/--join <agent>, --agents a,b, --rounds n (implement-review-fix, default 2), --name <name>, --out <file>, --print, --force`);
       return;
     }
     const flag = (name: string) => takeFlag(list, name);
     const bool = (name: string) => { const i = list.indexOf(name); if (i < 0) return false; list.splice(i, 1); return true; };
     const write = bool("--write"), printOnly = bool("--print"), force = bool("--force");
     const opts = { task: flag("--task") ?? "", cwd: flag("--cwd") ?? ".", write, plan: flag("--plan"), implement: flag("--implement"), review: flag("--review"),
-      join: flag("--join"), agents: flag("--agents")?.split(",").map(a => a.trim()).filter(Boolean), name: flag("--name") };
+      join: flag("--join"), agents: flag("--agents")?.split(",").map(a => a.trim()).filter(Boolean), name: flag("--name"),
+      ...(() => { const r = flag("--rounds"); return r === undefined ? {} : { rounds: /^\d+$/.test(r) ? Number(r) : NaN }; })() };
     const out = resolve(flag("--out") ?? `.sflow/${opts.name ?? arg}.json`);
     if (list.length) throw new Error(`unexpected arguments: ${list.join(" ")}`);
     const json = buildPreset(arg, opts);

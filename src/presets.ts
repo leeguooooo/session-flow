@@ -5,11 +5,12 @@ export const PRESETS = {
   review: "one read-only review of the project",
   "implement-review": "implement in a git worktree, then a read-only review of the actual diff (needs --write)",
   "plan-implement-review": "plan, implement in a git worktree, then review the actual diff (needs --write)",
+  "implement-review-fix": "implement in a git worktree, review; on needs-fix, fix in the same worktree and review again, up to --rounds (needs --write)",
   "fan-out": "several agents look at the same task in parallel, one joins their findings",
 } as const;
 export type Preset = keyof typeof PRESETS;
 
-export interface PresetOptions { task: string; cwd: string; write?: boolean; plan?: string; implement?: string; review?: string; agents?: string[]; join?: string; name?: string }
+export interface PresetOptions { task: string; cwd: string; write?: boolean; plan?: string; implement?: string; review?: string; agents?: string[]; join?: string; name?: string; rounds?: number }
 
 const IMPLEMENT = (task: string) => `Task: ${task}
 Implement it in your isolated git worktree (your current working directory). Keep the change as small as the task allows and follow the project's conventions. Run the project's relevant checks. Do not commit, push or merge.
@@ -17,6 +18,11 @@ Report done with: summary; details.workspace = absolute path of the worktree; ar
 const REVIEW = (task: string, after: string) => `Task under review: ${task}
 Find the worktree path in the ${after} dependency result (details.workspace). Inspect the actual change there yourself: git -C <path> status and git -C <path> diff. Rerun the key checks when you can do so without editing. Do not rely on the implementer's summary.
 Do not edit, commit or merge. Report done with findings (problems first, each with file and line), and whether the task is met; report blocked if the worktree or evidence is missing.`;
+
+const VERDICT = `End with a verdict in details.verdict: "pass" if the task is met with no problem that must be fixed first, otherwise "needs-fix" with the problems to fix listed first. Report it with: report done '<summary>' --detail verdict=pass (or verdict=needs-fix), adding --check for what you ran.`;
+const FIX = (task: string, review: string) => `Task: ${task}
+A reviewer found problems in the change in this worktree (your current working directory). Read the ${review} dependency result and fix what it lists, nothing else. Keep the existing uncommitted changes; do not reset, stash or recreate the worktree. Rerun the relevant checks. Do not commit, push or merge.
+Report done with: summary of what you changed for each finding; details.workspace = absolute path of the worktree; checks with what you ran. Report blocked if a finding cannot be fixed as described.`;
 
 function agent(value: string | undefined, fallback: string, flag: string) {
   const a = value ?? fallback;
@@ -30,7 +36,10 @@ export function buildPreset(preset: string, o: PresetOptions): Record<string, un
   if (!(preset in PRESETS)) throw new Error(`unknown preset ${preset}; one of: ${Object.keys(PRESETS).join(", ")}`);
   if (!o.task?.trim()) throw new Error("--task is required: describe the work in one or two sentences");
   const cwd = resolve(o.cwd);
-  const writes = preset === "implement-review" || preset === "plan-implement-review";
+  const writes = ["implement-review", "plan-implement-review", "implement-review-fix"].includes(preset);
+  const rounds = o.rounds ?? 2;
+  if (o.rounds !== undefined && preset !== "implement-review-fix") throw new Error("--rounds only applies to implement-review-fix");
+  if (!Number.isInteger(rounds) || rounds < 1 || rounds > 5) throw new Error("--rounds must be 1..5");
   if (writes && !o.write) throw new Error(`${preset} lets an agent write code in a new git worktree of ${cwd} (your checkout stays untouched, nothing is committed). Add --write to confirm`);
   if (!writes && o.write) throw new Error(`${preset} is read-only; --write does not apply`);
   const steps: Record<string, unknown>[] = [];
@@ -49,7 +58,20 @@ export function buildPreset(preset: string, o: PresetOptions): Record<string, un
       prompt: `Task: ${o.task}\nRead the relevant code and propose the smallest change that does it: files to touch, approach, and acceptance criteria someone can check. Do not edit files. Report done with the plan.` });
     steps.push({ id: "implement", agent: agent(o.implement, "codex", "--implement"), cwd, policy: "workspace-write", worktree: true,
       ...(steps.length ? { dependsOn: ["plan"] } : {}), prompt: IMPLEMENT(o.task) + (steps.length ? "\nFollow the plan in the plan dependency result." : "") });
-    steps.push({ id: "review", agent: agent(o.review, "claude", "--review"), cwd, dependsOn: ["implement"], prompt: REVIEW(o.task, "implement") });
+    if (preset !== "implement-review-fix") steps.push({ id: "review", agent: agent(o.review, "claude", "--review"), cwd, dependsOn: ["implement"], prompt: REVIEW(o.task, "implement") });
+    else {
+      // Rounds are unrolled into distinct steps: each round has its own identity, so a late report
+      // can never advance another round. A round that is not needed is skipped.
+      const reviewer = agent(o.review, "claude", "--review"), fixer = agent(o.implement, "codex", "--implement");
+      steps.push({ id: "review-1", agent: reviewer, cwd, dependsOn: ["implement"], prompt: `${REVIEW(o.task, "implement")}\n${VERDICT}` });
+      for (let k = 1; k <= rounds; k++) {
+        steps.push({ id: `fix-${k}`, agent: fixer, cwd, policy: "workspace-write", workspace: "implement", dependsOn: [`review-${k}`],
+          when: { [`review-${k}`]: { "details.verdict": "needs-fix" } }, prompt: FIX(o.task, `review-${k}`) });
+        steps.push({ id: `review-${k + 1}`, agent: reviewer, cwd, dependsOn: [`review-${k}`, `fix-${k}`], when: { [`fix-${k}`]: { status: "done" } },
+          prompt: `${REVIEW(o.task, `fix-${k}`)}\nThe ${`review-${k}`} dependency result lists what the previous review asked to fix; check each item and look for new problems.\n${VERDICT}`,
+          ...(k === rounds ? { expect: { "details.verdict": "pass" } } : {}) });
+      }
+    }
   }
   return { version: 1, name: o.name ?? preset, concurrency: preset === "fan-out" ? Math.min(steps.length - 1, 4) : 2, steps };
 }

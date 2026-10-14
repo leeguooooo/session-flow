@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { workspaceRoot } from "./config";
 import { command } from "./process";
 import { resolveResult } from "./results";
 import type { Run, SessionRuntime } from "./types";
@@ -38,9 +39,9 @@ export async function reviewRun(run: Run, runtime: SessionRuntime): Promise<RunR
         ...(full.artifacts !== undefined ? { artifacts: full.artifacts } : {}), ...(full.checks !== undefined ? { checks: full.checks } : {}),
         ...(full.details !== undefined ? { details: full.details } : {}) };
     }
-    if (step.worktree && s.cwd) {
+    if (step.policy === "workspace-write" && s.cwd) {
       const exists = existsSync(s.cwd);
-      review.worktree = { path: s.cwd, exists, branch: `sflow/${run.id}/${step.id}` };
+      review.worktree = { path: s.cwd, exists, branch: `sflow/${run.id}/${workspaceRoot(run.workflow.steps, step)}` };
       if (exists) {
         const status = await git(s.cwd, ["status", "--short"]);
         review.worktree.changes = status ? status.split("\n") : [];
@@ -55,7 +56,7 @@ export async function reviewRun(run: Run, runtime: SessionRuntime): Promise<RunR
       next.push(`${step.id}: outcome unknown and never retried automatically; check its result before starting a new run`);
     else if (["failed", "blocked"].includes(s.status) && s.result)
       next.push(`${step.id}: reported ${s.status}; that is final for this run. Start a new run to retry`);
-    if (review.worktree?.exists)
+    if (review.worktree?.exists && step.worktree)
       next.push(`${step.id}: worktree kept at ${review.worktree.path}; review it (git -C <path> diff), then commit/merge yourself or remove it with git worktree remove`);
   }
   return { runId: run.id, workflow: run.workflow.name, status: run.status, steps, next,

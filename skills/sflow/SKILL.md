@@ -34,13 +34,16 @@ For a common shape, let sflow write it and show the user the plan it prints:
 sflow init review --task "<what to look at>" --cwd <project>
 sflow init implement-review --write --task "<the change>" --cwd <project>
 sflow init plan-implement-review --write --task "<the change>" --cwd <project>
+sflow init implement-review-fix --write --rounds 2 --task "<the change>" --cwd <project>
 sflow init fan-out --task "<question>" --agents claude,codex,pi --cwd <project>
 ```
 
 Agents default to Codex implementing and Claude planning/reviewing; change them
 with `--plan`, `--implement`, `--review`, `--join`. `--write` lets an agent
 change code in a new git worktree; add it only when the user asked for a code
-change, and say so. The file lands in `.sflow/<preset>.json` (or `--out`).
+change, and say so. `implement-review-fix` loops review → fix (same worktree) →
+review up to `--rounds` times; unneeded rounds are `skipped` (normal, not stuck),
+and a last review still saying `needs-fix` ends the run `blocked` for the user. The file lands in `.sflow/<preset>.json` (or `--out`).
 
 Otherwise write the JSON from the user's description:
 
@@ -65,7 +68,8 @@ Otherwise write the JSON from the user's description:
 - `agent`: `claude`, `codex`, `pi` or `agy`. `model` is optional (the CLI's default otherwise).
 - `cwd` is required; relative paths resolve from the workflow file.
 - `dependsOn` forms a DAG; ready steps run in parallel up to `concurrency` (default 2).
-- `policy` defaults to `read-only`. Writing needs `"policy": "workspace-write"` plus `"worktree": true` in a Git repo with at least one commit. Worktrees are never committed or merged for you.
+- `policy` defaults to `read-only`. Writing needs `"policy": "workspace-write"` plus `"worktree": true` in a Git repo with at least one commit, or `"workspace": "<step>"` to continue in an earlier write step's worktree (it must be a dependency). Worktrees are never committed or merged for you.
+- `"when": {"<dep>": {"details.verdict": "needs-fix"}}` runs a step only on those result values, else it is `skipped`; a missing field blocks it. `"expect": {"details.verdict": "pass"}` blocks a `done` report without those values. Tell the worker the exact field, e.g. `report done '<summary>' --detail verdict=pass`.
 - `timeoutSeconds` (default 1800) and `readyTimeoutSeconds` (default 90) per step.
 - Each prompt must be self-contained: say what to inspect, what to produce and what "done" means. Dependency results are passed to the next step automatically.
 

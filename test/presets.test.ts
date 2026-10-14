@@ -12,8 +12,8 @@ test("every preset builds a workflow that passes normal validation", () => {
       const write = preset.includes("implement");
       const wf = parseWorkflow(buildPreset(preset, { task: "add a flag", cwd: dir, write }), dir);
       expect(wf.steps.length).toBeGreaterThan(0);
-      // Only an implement step may write, and only in a worktree.
-      for (const s of wf.steps) expect(s.policy === "workspace-write").toBe(s.id === "implement" && s.worktree === true);
+      // Only implement writes in a new worktree; fix rounds write only in implement's worktree.
+      for (const s of wf.steps) expect(s.policy === "workspace-write").toBe((s.id === "implement" && s.worktree === true) || (/^fix-\d$/.test(s.id) && s.workspace === "implement"));
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

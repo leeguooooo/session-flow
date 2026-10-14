@@ -1,12 +1,22 @@
 import { isAbsolute, resolve } from "node:path";
 import { statSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { AGENTS, type Agent, type Step, type Workflow } from "./types";
+import { AGENTS, type Agent, type Scalar, type Step, type Workflow } from "./types";
 
 const ID = /^[a-z][a-z0-9-]{0,39}$/;
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("expected an object");
   return value as Record<string, unknown>;
+}
+const FIELD = /^[A-Za-z_][\w-]*(\.[A-Za-z_][\w-]*){0,3}$/;
+function fields(value: unknown, where: string): Record<string, Scalar> {
+  const o = object(value);
+  if (!Object.keys(o).length) throw new Error(`${where}: expected at least one field`);
+  for (const [k, v] of Object.entries(o)) {
+    if (!FIELD.test(k)) throw new Error(`${where}: invalid field ${k} (use a path like details.verdict)`);
+    if (!["string", "number", "boolean"].includes(typeof v)) throw new Error(`${where}.${k}: expected a string, number or boolean`);
+  }
+  return o as Record<string, Scalar>;
 }
 function integer(value: unknown, fallback: number, min: number, max: number): number {
   const v = value ?? fallback;
@@ -33,7 +43,16 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
     const policy = s.policy ?? "read-only";
     if (policy !== "read-only" && policy !== "workspace-write") throw new Error(`${s.id}: unsupported policy`);
     if (s.worktree !== undefined && typeof s.worktree !== "boolean") throw new Error(`${s.id}: worktree must be boolean`);
-    if (policy === "workspace-write" && !s.worktree) throw new Error(`${s.id}: write steps require worktree: true`);
+    if (s.workspace !== undefined && (typeof s.workspace !== "string" || !ID.test(s.workspace))) throw new Error(`${s.id}: workspace must be a step id`);
+    if (s.workspace !== undefined && s.worktree) throw new Error(`${s.id}: use either worktree: true or workspace: <step>`);
+    if (s.workspace !== undefined && policy !== "workspace-write") throw new Error(`${s.id}: workspace is only for write steps`);
+    if (policy === "workspace-write" && !s.worktree && s.workspace === undefined) throw new Error(`${s.id}: write steps require worktree: true (or workspace: <an earlier write step>)`);
+    const when = s.when === undefined ? undefined : Object.fromEntries(Object.entries(object(s.when)).map(([dep, f]) => {
+      if (!(deps as string[]).includes(dep)) throw new Error(`${s.id}: when.${dep} must name a direct dependency`);
+      return [dep, fields(f, `${s.id}: when.${dep}`)];
+    }));
+    if (when && !Object.keys(when).length) throw new Error(`${s.id}: when needs at least one dependency`);
+    const expect = s.expect === undefined ? undefined : fields(s.expect, `${s.id}: expect`);
     if (policy === "read-only" && s.worktree) throw new Error(`${s.id}: worktree is only for write steps`);
     if (policy === "read-only") {
       const project = realpathSync(cwd);
@@ -44,6 +63,7 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
     }
     return { id: s.id, agent: s.agent as Agent, model: s.model as string | undefined, prompt: s.prompt, cwd,
       dependsOn: deps as string[], policy, worktree: s.worktree as boolean | undefined,
+      ...(s.workspace !== undefined ? { workspace: s.workspace as string } : {}), ...(when ? { when } : {}), ...(expect ? { expect } : {}),
       timeoutSeconds: integer(s.timeoutSeconds, 1800, 10, 86400),
       readyTimeoutSeconds: integer(s.readyTimeoutSeconds, 90, 5, 600) };
   });
@@ -58,5 +78,31 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
     visiting.add(id); step.dependsOn.forEach(visit); visiting.delete(id); visited.add(id);
   }
   steps.forEach(s => visit(s.id));
+  // One writer per worktree at a time: a step may reuse only an ancestor's worktree, and every
+  // two steps writing in the same worktree must be ordered by dependencies.
+  const ancestors = (id: string, seen = new Set<string>()): Set<string> => {
+    for (const d of byId.get(id)!.dependsOn) if (!seen.has(d)) { seen.add(d); ancestors(d, seen); }
+    return seen;
+  };
+  for (const s of steps.filter(s => s.workspace !== undefined)) {
+    const owner = byId.get(s.workspace!);
+    if (!owner) throw new Error(`${s.id}: workspace ${s.workspace} is not a step`);
+    if (owner.policy !== "workspace-write") throw new Error(`${s.id}: workspace ${s.workspace} is not a write step`);
+    if (!ancestors(s.id).has(owner.id)) throw new Error(`${s.id}: workspace ${owner.id} must be one of its (indirect) dependencies`);
+  }
+  const writers = new Map<string, string[]>();
+  for (const s of steps.filter(s => s.policy === "workspace-write")) {
+    const root = workspaceRoot(steps, s);
+    writers.set(root, [...(writers.get(root) ?? []), s.id]);
+  }
+  for (const ids of writers.values()) for (const a of ids) for (const b of ids)
+    if (a < b && !ancestors(a).has(b) && !ancestors(b).has(a)) throw new Error(`${a} and ${b} write in the same worktree; one must depend on the other`);
   return { version: 1, name: o.name, concurrency: integer(o.concurrency, 2, 1, 16), prefixWarmupMs: integer(o.prefixWarmupMs, 0, 0, 5000), steps };
+}
+
+// The step that owns the worktree a write step works in (itself, or the end of a workspace chain).
+export function workspaceRoot(steps: Step[], step: Step): string {
+  let current = step;
+  for (let i = 0; current.workspace !== undefined && i < steps.length; i++) current = steps.find(s => s.id === current.workspace)!;
+  return current.id;
 }

@@ -7,7 +7,7 @@ import { createRun, loadRun, lockRun, saveRun } from "./store";
 import { OcsTransport } from "./ocs";
 import { TmuxRuntime } from "./runtime";
 import { drive, reconcile } from "./engine";
-import { workerTask, workerReport } from "./worker";
+import { workerTask, workerReport, plainReport } from "./worker";
 import { checked } from "./process";
 import { runMetrics } from "./metrics";
 import { resolveResult } from "./results";
@@ -59,7 +59,7 @@ async function main() {
   // Inside a worker wrapper the only useful commands are task and report; a bare call (seen from a
   // Pi worker) gets that, not the driver help it would then improvise from.
   if (!cmd && process.env.SFLOW_TOKEN && process.env.SFLOW_STEP_ID) {
-    console.log(`This is the Session Flow worker command for step ${process.env.SFLOW_STEP_ID}. Run it with "task" to get your assignment, then "report --json '<JSON>'" once when finished.`);
+    console.log(`This is the Session Flow worker command for step ${process.env.SFLOW_STEP_ID}. Run it with "task" to get your assignment, then "report done '<summary>'" once when finished.`);
     return;
   }
   if (!cmd || cmd === "help" || cmd === "--help") {
@@ -84,6 +84,7 @@ sflow logs <run-id> <step-id>         capture its terminal output
 sflow stop <run-id>                  stop only this run's workers; retain artifacts
 sflow task                          worker: read assignment and report acceptance
 sflow report --file <result.json>    worker: report done/blocked/failed
+sflow report done '<summary>' [--check …] [--artifact …]   worker: report (or failed/blocked)
 sflow report --json '<JSON>'         worker: report without writing a file
 sflow skill install                 install the sflow skill for Claude Code, Codex, Pi and agy
 sflow upgrade [--check|--json]       install the latest release and refresh the skill
@@ -135,7 +136,9 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
   }
   if (cmd === "task") { if (arg) throw new Error("task takes no arguments"); print(await workerTask(transport)); return; }
   if (cmd === "report") {
-    if (!["--file", "--json"].includes(arg) || rest.length !== 1) throw new Error("report --file <result.json> or --json '<JSON>'");
+    // Plain arguments keep JSON braces out of the shell command, which Claude flags for approval.
+    if (["done", "failed", "blocked"].includes(arg)) { print(await workerReport(transport, plainReport(arg, rest))); return; }
+    if (!["--file", "--json"].includes(arg) || rest.length !== 1) throw new Error("report done|failed|blocked '<summary>' [--check '<what ran, what it showed>']... [--artifact <path>]..., or report --json '<JSON>' / --file <result.json>");
     print(await workerReport(transport, JSON.parse(arg === "--file" ? readFileSync(rest[0], "utf8") : rest[0] === "-" ? readFileSync(0, "utf8") : rest[0]))); return;
   }
   if (cmd === "validate" || cmd === "run") {

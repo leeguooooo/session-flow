@@ -40,3 +40,13 @@ test("a bare worker wrapper call says to run task, not the driver help", () => {
   expect(out).toContain('step join. Run it with "task"');
   expect(out).not.toContain("sflow init");
 });
+
+test("a plain report keeps JSON out of the worker's shell command", async () => {
+  const { plainReport } = await import("../src/worker");
+  expect(plainReport("done", ["it works", "--check", "sh test.sh: ok", "--artifact", "/x/a.txt", "--check", "lint: ok"]))
+    .toEqual({ status: "done", summary: "it works", checks: ["sh test.sh: ok", "lint: ok"], artifacts: ["/x/a.txt"] });
+  expect(plainReport("blocked", ["needs access"])).toEqual({ status: "blocked", summary: "needs access" });
+  expect(() => plainReport("done", [])).toThrow("needs a summary");
+  expect(() => plainReport("done", ["s", "--check"])).toThrow("report flags");
+  expect(() => plainReport("done", ["s", "--details", "x"])).toThrow("report flags");
+});

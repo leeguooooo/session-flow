@@ -104,3 +104,20 @@ test.skipIf(!Bun.which("tmux"))("a waiting menu is read from the pane and answer
     expect(await readWhenWritten(join(run.steps.a.cwd!, "answered.txt"))).toContain("[B");
   } finally { await rt.stop(run, "a"); }
 });
+
+test.skipIf(!Bun.which("tmux"))("a read-only Claude step starts in the shared workspace with its project as a working directory", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sf-runtime-")); cleanup.push(root);
+  const bin = join(root, "bin"), project = join(root, "project"); mkdirSync(bin); mkdirSync(project);
+  process.env.SFLOW_HOME = join(root, "state"); process.env.PATH = bin + ":" + oldPath;
+  writeFileSync(join(bin, "claude"), '#!/bin/sh\nwhile :; do sleep 1; done\n'); chmodSync(join(bin, "claude"), 0o700);
+  const run = createRun(parseWorkflow({ version: 1, name: "claude-dirs", steps: [{ id: "look", agent: "claude", cwd: project, prompt: "p" }] }, root));
+  cleanup.push(join(run.socket, ".."));
+  const rt = new TmuxRuntime(["/bin/true"]);
+  try {
+    run.steps.look.status = "launching"; await rt.create(run, run.workflow.steps[0]);
+    expect(run.steps.look.cwd).toBe(join(root, "state", "workspaces", "claude"));
+    const start = readFileSync(join(run.dir, "look", "start.sh"), "utf8");
+    expect(start).toContain(`'--add-dir' '${project}'`);
+    expect(start).toContain(`'--add-dir' '${run.dir}'`);
+  } finally { await rt.stop(run, "look"); }
+});

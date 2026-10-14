@@ -126,7 +126,8 @@ The choice belongs to the user, but they answer in this conversation:
    "always allow" options, and do not treat silence as yes.
 3. Run `sflow answer <run-id> <step-id> <prompt-id> <n>`. It refuses if the
    screen now shows a different prompt; show the new one and ask again. Its
-   output names any follow-up prompt.
+   output names any follow-up prompt; if it says the screen still shows the
+   answered prompt, check `sflow status` before asking again.
 
 The user can still answer directly with `sflow attach <run-id> <step-id>`.
 Never add bypass flags.

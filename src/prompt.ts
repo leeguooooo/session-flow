@@ -57,6 +57,17 @@ export function menuKeys(menu: Menu, choice: number): string[] {
   return [...Array(Math.abs(delta)).fill(delta > 0 ? "Down" : "Up"), "Enter"];
 }
 
+// After an answer the TUI redraws a moment later; until then the answered menu is still on screen.
+// Only a different menu is a follow-up; the same id after the wait is "unchanged", not a new question.
+export async function afterAnswer(id: string, read: () => Promise<Menu | null>, tries = 10, waitMs = 300): Promise<Menu | null | "unchanged"> {
+  for (let i = 0; i < tries; i++) {
+    await Bun.sleep(waitMs);
+    const menu = await read();
+    if (menu?.id !== id) return menu;
+  }
+  return "unchanged";
+}
+
 // Errors a worker's screen can show before it accepts. Only what is seen is reported; anything
 // else is "cause unknown", never assumed to be a trust or approval prompt.
 const TROUBLE = /\b(HTTP\s*)?5\d\d\b.*(error|gateway|timeout|unavailable)|\b(error|gateway|timeout)\b.*\b5\d\d\b|rate.?limit|quota|not logged in|log ?in required|please (log|sign) in|sign in to|unauthori[sz]ed|authenticat(e|ion) (failed|required)|api key|connection (refused|reset|error)|network error|ECONNREFUSED|ETIMEDOUT/i;

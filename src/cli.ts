@@ -13,7 +13,7 @@ import { runMetrics } from "./metrics";
 import { resolveResult } from "./results";
 import { preflight, requiredTools } from "./preflight";
 import { installSkill } from "./skill";
-import { parseMenu, menuKeys } from "./prompt";
+import { afterAnswer, parseMenu, menuKeys } from "./prompt";
 import { Progress, describe, type ProgressMode } from "./progress";
 import { reviewRun, renderReview } from "./review";
 import { doctor, renderChecks } from "./doctor";
@@ -173,9 +173,12 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
     if (menu.id !== id) throw new Error(`${step} now shows a different prompt (${menu.id}); show it to the user again: ${JSON.stringify(menu)}`);
     const keys = menuKeys(menu, Number(choice));
     await runtime.keys(run, step, keys);
-    await Bun.sleep(500);
-    const after = parseMenu(await runtime.screen(run, step));
-    print({ step, answered: menu.options[Number(choice) - 1], ...(after ? { nextPrompt: after } : {}) }); return;
+    // The TUI redraws a moment after the keys. Until the answered menu leaves the screen it is not
+    // a follow-up: only a different prompt is reported as nextPrompt (#7).
+    const after = await afterAnswer(id, async () => parseMenu(await runtime.screen(run, step)));
+    const answered = menu.options[Number(choice) - 1];
+    if (after === "unchanged") { print({ step, answered, screen: "still shows the answered prompt; check sflow status before asking again" }); return; }
+    print({ step, answered, ...(after ? { nextPrompt: after } : {}) }); return;
   }
   const resumeMode = cmd === "resume" ? progressMode(rest) : "none";
   if (cmd === "review") {

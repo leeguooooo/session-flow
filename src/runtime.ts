@@ -59,7 +59,9 @@ Report once using ${cliText} report --json '<JSON>' (or --json - with JSON on st
       if (!existsSync(settings)) writeFileSync(settings, JSON.stringify({ permissions: { crossSessionInbound: "accept" } }), { mode: 0o600 });
       argv = ["claude", "--permission-mode", "default", "--settings", settings, "--name", `sflow-${step.id}`, "--add-dir", run.dir,
         "--allowedTools", `Bash(${cliText} task),Bash(${cliText} report *)`];
-      if (step.policy === "read-only") argv.push("--disallowedTools", "Edit,Write,NotebookEdit");
+      // A read-only step starts outside its project, so the project joins Claude's working
+      // directories; otherwise every read of it asks "outside the working directories".
+      if (step.policy === "read-only") argv.push("--add-dir", step.cwd, "--disallowedTools", "Edit,Write,NotebookEdit");
       if (step.model) argv.push("--model", step.model);
       argv.push("--", prompt);
     } else if (step.agent === "pi") {

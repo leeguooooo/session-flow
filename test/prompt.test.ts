@@ -121,3 +121,14 @@ test("a long option that wraps stays one option", () => {
   expect(menu.question).toContain("Do you want to proceed?");
   expect(menuKeys(menu, 4)).toEqual(["Down", "Down", "Down", "Enter"]);
 });
+
+test("an answered menu still on screen is not reported as the next prompt (#7)", async () => {
+  const { afterAnswer } = await import("../src/prompt");
+  const old = { id: "a", question: ["q"], options: ["x", "y"], selected: 0 };
+  const next = { id: "b", question: ["q2"], options: ["x", "y"], selected: 0 };
+  let reads = 0;
+  expect(await afterAnswer("a", async () => (++reads < 3 ? old : null), 10, 1)).toBeNull();
+  reads = 0;
+  expect(await afterAnswer("a", async () => (++reads < 3 ? old : next), 10, 1)).toEqual(next);
+  expect(await afterAnswer("a", async () => old, 3, 1)).toBe("unchanged");
+});

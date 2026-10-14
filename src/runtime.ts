@@ -6,6 +6,13 @@ import { saveRun } from "./store";
 import { diagnoseScreen, parseMenu, type Menu } from "./prompt";
 import type { Run, Step, SessionRuntime } from "./types";
 
+// Claude's Bash rules match the command text, and the worker types the path quoted or bare
+// (both seen in real runs). Allow both spellings, but only the bare one when it needs no quoting.
+export function allowWorker(path: string, quoted: string): string {
+  const forms = /^[\w./-]+$/.test(path) && path !== quoted ? [quoted, path] : [quoted];
+  return forms.flatMap(f => [`Bash(${f} task)`, `Bash(${f} report *)`]).join(",");
+}
+
 export class TmuxRuntime implements SessionRuntime {
   constructor(readonly cli: string[], readonly binary = process.env.SFLOW_TMUX_BIN ?? "tmux") {}
   async exists(run: Run, id: string) {
@@ -58,7 +65,7 @@ Report once using ${cliText} report --json '<JSON>' (or --json - with JSON on st
       const settings = join(commonCwd, "claude-settings.json");
       if (!existsSync(settings)) writeFileSync(settings, JSON.stringify({ permissions: { crossSessionInbound: "accept" } }), { mode: 0o600 });
       argv = ["claude", "--permission-mode", "default", "--settings", settings, "--name", `sflow-${step.id}`, "--add-dir", run.dir,
-        "--allowedTools", `Bash(${cliText} task),Bash(${cliText} report *)`];
+        "--allowedTools", allowWorker(protocol, cliText)];
       // A read-only step starts outside its project, so the project joins Claude's working
       // directories; otherwise every read of it asks "outside the working directories".
       if (step.policy === "read-only") argv.push("--add-dir", step.cwd, "--disallowedTools", "Edit,Write,NotebookEdit");

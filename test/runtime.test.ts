@@ -121,3 +121,10 @@ test.skipIf(!Bun.which("tmux"))("a read-only Claude step starts in the shared wo
     expect(start).toContain(`'--add-dir' '${run.dir}'`);
   } finally { await rt.stop(run, "look"); }
 });
+
+test("Claude may run its worker command with the path quoted or bare", async () => {
+  const { allowWorker } = await import("../src/runtime");
+  expect(allowWorker("/s/runs/r/look/worker", "'/s/runs/r/look/worker'")).toBe(
+    "Bash('/s/runs/r/look/worker' task),Bash('/s/runs/r/look/worker' report *),Bash(/s/runs/r/look/worker task),Bash(/s/runs/r/look/worker report *)");
+  expect(allowWorker("/a b/worker", "'/a b/worker'")).toBe("Bash('/a b/worker' task),Bash('/a b/worker' report *)");
+});

@@ -12,6 +12,7 @@ import { checked } from "./process";
 import { runMetrics } from "./metrics";
 import { resolveResult } from "./results";
 import { preflight, requiredTools } from "./preflight";
+import { installSkill } from "./skill";
 
 const cli = import.meta.path.includes("$bunfs") ? [process.execPath] : [process.execPath, import.meta.path];
 const transport = new OcsTransport(), runtime = new TmuxRuntime(cli);
@@ -28,7 +29,7 @@ function publicRun(run: ReturnType<typeof loadRun>, full = false) {
 async function main() {
   const [cmd, arg, ...rest] = args;
   if (!cmd || cmd === "help" || cmd === "--help") {
-    console.log(`Session Flow 0.1.3 — native agent sessions, connected by OCS
+    console.log(`Session Flow 0.1.4 — native agent sessions, connected by OCS
 
 sflow validate <workflow.json>       validate without starting agents
 sflow run <workflow.json>            create workers and drive the workflow
@@ -42,13 +43,18 @@ sflow stop <run-id>                  stop only this run's workers; retain artifa
 sflow task                          worker: read assignment and report acceptance
 sflow report --file <result.json>    worker: report done/blocked/failed
 sflow report --json '<JSON>'         worker: report without writing a file
+sflow skill install                 install the sflow skill for Claude Code, Codex and Pi
 sflow version
 
 Claude/Codex authenticate through their own CLIs. No orcr or Herdr required.
 Native tmux adapter currently supports macOS/Linux. Ctrl-C stops the driver,
 leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
   }
-  if (cmd === "version") { console.log("0.1.3"); return; }
+  if (cmd === "version") { console.log("0.1.4"); return; }
+  if (cmd === "skill") {
+    if (arg !== "install" || rest.length) throw new Error("skill install");
+    for (const path of installSkill()) console.log(`installed ${path}`); return;
+  }
   if (cmd === "task") { if (arg) throw new Error("task takes no arguments"); print(await workerTask(transport)); return; }
   if (cmd === "report") {
     if (!["--file", "--json"].includes(arg) || rest.length !== 1) throw new Error("report --file <result.json> or --json '<JSON>'");

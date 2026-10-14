@@ -24,6 +24,10 @@ mkdir -p "$destination"
 install -m 755 "$stage/sflow" "$destination/sflow"
 echo "installed $destination/sflow"
 "$destination/sflow" version
+# The skill is embedded in the binary, so it always matches this version.
+if [ "${SFLOW_INSTALL_SKILLS:-1}" != "0" ]; then
+  "$destination/sflow" skill install </dev/null || echo "warning: skill setup failed; rerun: sflow skill install" >&2
+fi
 # sflow itself is installed; say what a first run will still need.
 missing=0
 command -v tmux >/dev/null 2>&1 || { missing=1; echo "note: tmux not found; install it with 'brew install tmux' (macOS) or 'sudo apt install tmux' (Debian/Ubuntu)"; }

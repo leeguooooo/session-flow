@@ -27,7 +27,7 @@ bun run bench:context
 ./dist/sflow help
 ```
 
-需要先安装并登录 `claude` 和 `codex`，再装好 `tmux` 和 [OCS](https://github.com/leeguooooo/open-cross-session) 0.8.0 或更新版本。只有工作流里用到的 agent 才必须安装。这个 MVP 用已发布的 OCS 0.8.0 就能跑，不需要后来新增的 send/dm JSON 输出和 whoami threadId。不通过 npm registry 分发。
+需要先安装并登录 `claude` 和 `codex`，再装好 `tmux` 和 [OCS](https://github.com/leeguooooo/open-cross-session) 0.8.0 或更新版本。只有工作流里用到的 agent 才必须安装。每个步骤的原生 TUI 跑在一个私有的 tmux 会话里，`attach`、`logs`、按 Ctrl-C 只停调度器而不停 worker、以及 `resume` 都靠它。`sflow run` 会在创建任何东西之前检查所有依赖，缺什么就列出来，并给出安装命令。tmux 用 `brew install tmux`（macOS）或 `sudo apt install tmux`（Debian/Ubuntu）安装；二进制不在 `PATH` 里时，用 `SFLOW_TMUX_BIN` 和 `SFLOW_OCS_BIN` 指定路径。暂不支持 Windows（WSL 可以）。这个 MVP 用已发布的 OCS 0.8.0 就能跑，不需要后来新增的 send/dm JSON 输出和 whoami threadId。不通过 npm registry 分发。
 
 ## 运行
 

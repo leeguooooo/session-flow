@@ -9,6 +9,7 @@ Session Flow creates independent coding-agent sessions and advances a workflow w
 - `ocs.ts`: public `ocs send` and `ocs read --peek --since 0 --json`. Known channel names and structured message bodies avoid parsing human-readable send output. OCS send/dm JSON is useful but not required by this MVP.
 - `engine.ts`: one durable driver, dependency and concurrency scheduling, explicit worker-result reconciliation.
 - `worker.ts`: protocol wrapper for fetching an assignment and reporting acceptance/completion. Native OCS session identity and a per-step capability prevent accidental cross-step attribution.
+- `preflight.ts`: before a run is created, checks tmux, OCS and every agent CLI the workflow names (found on `PATH` and answering its version command) and reports all failures together with install hints. Nothing is created when any check fails.
 
 ## Lifecycle
 

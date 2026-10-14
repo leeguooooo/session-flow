@@ -11,6 +11,7 @@ import { workerTask, workerReport } from "./worker";
 import { checked } from "./process";
 import { runMetrics } from "./metrics";
 import { resolveResult } from "./results";
+import { preflight, requiredTools } from "./preflight";
 
 const cli = import.meta.path.includes("$bunfs") ? [process.execPath] : [process.execPath, import.meta.path];
 const transport = new OcsTransport(), runtime = new TmuxRuntime(cli);
@@ -58,8 +59,7 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
     const file = resolve(arg), workflow = parseWorkflow(JSON.parse(readFileSync(file, "utf8")), dirname(file));
     if (cmd === "validate") { print({ valid: true, workflow }); return; }
     if (process.platform === "win32") throw new Error("tmux adapter requires macOS/Linux");
-    await checked([runtime.binary, "-V"]); await checked([transport.binary, "version"]);
-    for (const agent of new Set(workflow.steps.map(s => s.agent))) if (!Bun.which(agent)) throw new Error(`${agent} is not installed`);
+    await preflight(requiredTools(runtime.binary, transport.binary, workflow.steps.map(s => s.agent)));
     const run = createRun(workflow); print({ runId: run.id, channel: run.channel });
     const unlock = lockRun(run);
     try { await drive(run, runtime, transport); } finally { unlock(); }

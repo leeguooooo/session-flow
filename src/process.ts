@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 export function cleanEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
-    if (["CLAUDECODE", "TMUX", "TMUX_PANE"].includes(key) || /^(CLAUDE_CODE_|CODEX_THREAD|CODEX_SESSION|HERMES_SESSION|PI_SESSION|OCS_NAME|SFLOW_)/.test(key)) delete env[key];
+    if (["CLAUDECODE", "TMUX", "TMUX_PANE", "OCS_PI_SESSION_ID"].includes(key) || /^(CLAUDE_CODE_|CODEX_THREAD|CODEX_SESSION|HERMES_SESSION|PI_SESSION|OCS_NAME|SFLOW_)/.test(key)) delete env[key];
   }
   // Credentials and provider configuration remain with the user's native CLIs.
   return { ...env, ...extra };

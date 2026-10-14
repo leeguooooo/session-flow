@@ -6,7 +6,7 @@ https://github.com/user-attachments/assets/5f564a03-848a-4a9e-bbf3-ac68cea78efd
 
 The middle of the video is a real run of [examples/smoke.json](examples/smoke.json), captured from its tmux panes.
 
-Run a workflow across independent Claude Code and Codex sessions. Each step selects its agent and model; OCS carries assignments and explicit results. The first runtime adapter creates native TUIs in private tmux sessions on macOS/Linux.
+Run a workflow across independent Claude Code, Codex, Pi and Antigravity CLI (`agy`) sessions. Each step selects its agent and model; OCS carries assignments and explicit results. The first runtime adapter creates native TUIs in private tmux sessions on macOS/Linux.
 
 No orcr, Herdr, API proxy, or copied OCS internals. Native CLIs use their own authenticated accounts.
 
@@ -27,7 +27,7 @@ bun run bench:context
 ./dist/sflow help
 ```
 
-Install and authenticate `claude` and `codex`, and install `tmux` and [OCS](https://github.com/leeguooooo/open-cross-session) 0.8.0 or newer. Only the agents named in your workflow are required. tmux hosts each step's native TUI in a private session, which is what makes `attach`, `logs`, Ctrl-C without stopping workers, and `resume` possible. `sflow run` checks every dependency before creating anything and lists what is missing with install commands. Install tmux with `brew install tmux` (macOS) or `sudo apt install tmux` (Debian/Ubuntu); `SFLOW_TMUX_BIN` and `SFLOW_OCS_BIN` point at binaries outside `PATH`. Windows is not supported yet (WSL works). This MVP works with released OCS 0.8.0 and does not require the newer send/dm JSON or whoami threadId additions. There is no npm registry distribution.
+Install and authenticate the agent CLIs your workflow uses (`claude`, `codex`, `pi`, `agy`), and install `tmux` and [OCS](https://github.com/leeguooooo/open-cross-session) 0.8.0 or newer. Only the agents named in your workflow are required. tmux hosts each step's native TUI in a private session, which is what makes `attach`, `logs`, Ctrl-C without stopping workers, and `resume` possible. `sflow run` checks every dependency before creating anything and lists what is missing with install commands. Install tmux with `brew install tmux` (macOS) or `sudo apt install tmux` (Debian/Ubuntu); `SFLOW_TMUX_BIN` and `SFLOW_OCS_BIN` point at binaries outside `PATH`. Windows is not supported yet (WSL works). This MVP works with released OCS 0.8.0 and does not require the newer send/dm JSON or whoami threadId additions. There is no npm registry distribution.
 
 ## Run
 
@@ -77,7 +77,20 @@ sflow attach <run-id> <step-id>
 
 `model` is optional: omit it to use that CLI's configured default, or name a model your account supports. Relative `cwd` paths resolve from the workflow file. `dependsOn` creates a DAG; independent ready steps run concurrently. Default policy is `read-only`; writing requires `worktree: true` and a Git repository with an existing commit. Default execution timeout is 1800 seconds, readiness timeout 90 seconds (`timeoutSeconds` / `readyTimeoutSeconds`).
 
-The synthetic [examples/smoke.json](examples/smoke.json) exercises Claude planning, Claude/Codex parallel workers, and a Codex join without modifying project files.
+The synthetic [examples/smoke.json](examples/smoke.json) exercises Claude planning, Claude/Codex parallel workers, and a Codex join without modifying project files. [examples/mixed.json](examples/mixed.json) runs the same graph on four agents: Pi plans, agy and Claude work in parallel, Codex joins.
+
+### Agents
+
+`agent` is `claude`, `codex`, `pi` or `agy`. Each runs as its own native TUI; what differs is how a step is confined and how its report is attributed:
+
+| agent | read-only step | approvals | who may report |
+|---|---|---|---|
+| `claude` | file-edit tools disabled; only this step's wrapper is pre-approved | native Claude prompts | the Claude session (`claude-…`) |
+| `codex` | project outside the sandbox write roots | `on-request` | the full Codex thread (`codex-<thread id>`) |
+| `pi` | `edit` and `write` tools removed; **bash stays available** (Pi has no per-tool approvals) | none | the Pi session (`pi-<session id>`), which needs the OCS Pi extension (`ocs doctor --fix`) |
+| `agy` | instruction plus agy's approvals | agy asks before each command; answer with `sflow attach` | bound to the step (`agy-<run>-<step>`): agy has no per-session identity in OCS, so its report rests on the step's capability alone |
+
+Session Flow starts agy as an interactive TUI it owns. This is separate from OCS's optional `ocs agy start` receiver, which serves `ocs dm agy` with headless runs; the two do not share conversations. Hermes is not supported as a worker.
 
 ## Less traffic and repeated context
 
@@ -111,7 +124,7 @@ records instead of misreading referenced results.
 
 ## Trust, approvals, and recovery
 
-New native sessions can prompt for directory trust, login, or tool approval. Open the indicated worker with `attach` and handle the prompt. Standard approvals remain enabled; this version does not promise unattended execution. For Claude, read-only forbids file-edit tools but shell actions still use native permission gates. Codex review workers can write protocol/results and OCS messages, while the reviewed repository stays outside their sandbox write roots.
+New native sessions can prompt for directory trust, login, or tool approval. Open the indicated worker with `attach` and handle the prompt. Standard approvals remain enabled; this version does not promise unattended execution. For Claude, read-only forbids file-edit tools but shell actions still use native permission gates. Pi read-only steps cannot edit or write files through Pi's tools but can still run shell commands. agy asks before every command; approve its wrapper with "always allow in this conversation" to avoid a second prompt for the report. Codex review workers can write protocol/results and OCS messages, while the reviewed repository stays outside their sandbox write roots.
 
 Ctrl-C stops the driver and leaves workers available. Keep the printed run ID:
 
@@ -134,4 +147,4 @@ bun run check
 bun run build
 ```
 
-[DESIGN.md](DESIGN.md) describes ownership, failure semantics, protocol, and MVP limits. Runtime adapters are replaceable; this release implements only tmux and Claude/Codex TUIs.
+[DESIGN.md](DESIGN.md) describes ownership, failure semantics, protocol, and MVP limits. Runtime adapters are replaceable; this release implements tmux with Claude, Codex, Pi and agy TUIs.

@@ -46,3 +46,35 @@ test.skipIf(!Bun.which("tmux"))("real tmux sessions forward model safely and iso
     expect(firstPrompt).not.toContain(join(run.dir, "second", "worker"));
   } finally { for (const step of run.workflow.steps) await rt.stop(run, step.id); }
 });
+
+test.skipIf(!Bun.which("tmux"))("pi and agy start their native TUIs with the step's model and policy", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sf-runtime-")); cleanup.push(root);
+  const bin = join(root, "bin"), project = join(root, "project"); mkdirSync(bin); mkdirSync(project);
+  process.env.SFLOW_HOME = join(root, "state"); process.env.PATH = bin + ":" + oldPath;
+  for (const name of ["pi", "agy"]) { writeFileSync(join(bin, name), '#!/bin/sh\nprintf "%s\\n" "$@" > "argv-$$.txt"\nwhile :; do sleep 1; done\n'); chmodSync(join(bin, name), 0o700); }
+  const run = createRun(parseWorkflow({ version: 1, name: "native-test", steps: [
+    { id: "p", agent: "pi", model: "provider/model", cwd: project, prompt: "test" },
+    { id: "a", agent: "agy", model: "flash", cwd: project, prompt: "test" }] }, root));
+  cleanup.push(join(run.socket, ".."));
+  const rt = new TmuxRuntime(["/bin/true"]);
+  try {
+    for (const step of run.workflow.steps) { run.steps[step.id].status = "launching"; await rt.create(run, step); }
+    await Bun.sleep(150);
+    const argv = async (id: string) => {
+      const pid = (await command(["tmux", "-S", run.socket, "display-message", "-p", "-t", run.steps[id].session, "#{pane_pid}"])).stdout.trim();
+      return readFileSync(join(run.steps[id].cwd!, `argv-${pid}.txt`), "utf8").split("\n");
+    };
+    const p = await argv("p"), a = await argv("a");
+    expect(p.slice(0, 5)).toEqual(["--exclude-tools", "edit,write", "--model", "provider/model", "--"]);
+    expect(a).toContain("--prompt-interactive"); expect(a.slice(a.indexOf("--model"), a.indexOf("--model") + 2)).toEqual(["--model", "flash"]);
+    expect(a).toContain(join(run.dir, "a")); expect(a.join(" ")).not.toContain("dangerously");
+  } finally { for (const step of run.workflow.steps) await rt.stop(run, step.id); }
+});
+
+test("workflows accept pi and agy steps and reject unknown agents", () => {
+  const root = mkdtempSync(join(tmpdir(), "sf-config-")); cleanup.push(root);
+  const wf = (agent: string) => parseWorkflow({ version: 1, name: "agents", steps: [{ id: "s", agent, cwd: root, prompt: "x" }] }, root);
+  expect(wf("pi").steps[0].agent).toBe("pi");
+  expect(wf("agy").steps[0].agent).toBe("agy");
+  expect(() => wf("hermes")).toThrow("agent must be one of claude, codex, pi, agy");
+});

@@ -20,7 +20,8 @@ export function reconcile(run: Run, rows: Message[]) {
     const e = parseBody(row) as WorkerEvent | null;
     if (!e || e.type !== "sflow.worker" || e.version !== 1 || e.runId !== run.id) continue;
     const state = run.steps[e.stepId];
-    if (!state || !validProof(e, state.token) || row.from !== e.actor || !nativeActor(e.actor)) continue;
+    if (!state || !validProof(e, state.token) || row.from !== e.actor ||
+      !nativeActor(e.actor, run.workflow.steps.find(s => s.id === e.stepId)?.agent, { runId: run.id, stepId: e.stepId })) continue;
     if (state.actor && state.actor !== e.actor) continue;
     // Only workers that this driver actually tried to create can report.
     if (["pending", "dispatching", "cancelled"].includes(state.status)) continue;

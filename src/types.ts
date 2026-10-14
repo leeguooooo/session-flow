@@ -1,4 +1,5 @@
-export type Agent = "claude" | "codex";
+export type Agent = "claude" | "codex" | "pi" | "agy";
+export const AGENTS: readonly Agent[] = ["claude", "codex", "pi", "agy"];
 export type Policy = "read-only" | "workspace-write";
 export interface Step {
   id: string;
@@ -82,5 +83,5 @@ export interface SessionRuntime {
 export interface Transport {
   read(channel: string, as: string): Promise<Message[]>;
   send(channel: string, body: unknown, as: string): Promise<void>;
-  whoami(): Promise<string>;
+  whoami(agent?: Agent, scope?: { runId: string; stepId: string }): Promise<string>;
 }

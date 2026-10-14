@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "name": "mixed",
+  "concurrency": 2,
+  "steps": [
+    {
+      "id": "plan",
+      "agent": "pi",
+      "cwd": "..",
+      "prompt": "This is a small protocol acceptance test. Do not read or change project files. Report done with summary exactly \"plan-ready\" and details {\"number\":21}.",
+      "readyTimeoutSeconds": 120
+    },
+    {
+      "id": "double",
+      "agent": "agy",
+      "cwd": "..",
+      "dependsOn": [
+        "plan"
+      ],
+      "prompt": "Read the number from dependency plan details, double it and report done with details {\"number\":42}. Do not read or change project files.",
+      "readyTimeoutSeconds": 120
+    },
+    {
+      "id": "check",
+      "agent": "claude",
+      "cwd": "..",
+      "dependsOn": [
+        "plan"
+      ],
+      "prompt": "Check dependency plan details.number is 21 and report done with details {\"valid\":true}. Do not read or change project files.",
+      "readyTimeoutSeconds": 120
+    },
+    {
+      "id": "summary",
+      "agent": "codex",
+      "cwd": "..",
+      "dependsOn": [
+        "double",
+        "check"
+      ],
+      "prompt": "Verify dependency double details.number is 42 and check details.valid is true. Report done with a summary describing both results. Do not read or change project files.",
+      "readyTimeoutSeconds": 120
+    }
+  ]
+}

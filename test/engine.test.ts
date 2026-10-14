@@ -12,6 +12,12 @@ import { resolveResult } from "../src/results";
 
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); for (const k of ["SFLOW_HOME", "SFLOW_RUN_ID", "SFLOW_STEP_ID", "SFLOW_TOKEN"]) delete process.env[k]; });
+// A fixture actor shaped like the native session of each step's agent.
+function actorFor(run: Run, id: string) {
+  const agent = run.workflow.steps.find(s => s.id === id)!.agent;
+  return agent === "claude" ? "claude-12345678" : agent === "pi" ? "pi-01a1386a-5b57-72eb-9178-7f54f0dd7686"
+    : agent === "agy" ? `agy-${run.id.slice(0, 8)}-${id}` : "codex-12345678";
+}
 function setup(steps: object[], concurrency = 2) {
   const home = mkdtempSync(join(tmpdir(), "sf-test-")); dirs.push(home); process.env.SFLOW_HOME = join(home, "state");
   const project = join(home, "project"); mkdirSync(project);
@@ -26,7 +32,7 @@ class FakeTransport implements Transport {
     if (this.failSend) throw new Error("unknown outcome");
     this.rows.push({ seq: this.rows.length + 1, body: JSON.stringify(body), from: as });
   }
-  report(run: Run, id: string, status: string, actor = "codex-12345678", token = run.steps[id].token) {
+  report(run: Run, id: string, status: string, actor = actorFor(run, id), token = run.steps[id].token) {
     const e = { type: "sflow.worker" as const, version: 1 as const, runId: run.id, stepId: id, actor, status: status as "done", result: { summary: id } };
     this.rows.push({ seq: this.rows.length + 1, from: actor,
       body: JSON.stringify({ ...e, proof: eventProof(e, token) }) });
@@ -142,7 +148,7 @@ test("large dependency results become inspectable files within OCS byte limit", 
   const rt = new FakeRuntime(), tr = new FakeTransport(); await tick(run, rt, tr);
   for (const id of ["a", "b"]) {
     tr.report(run, id, "accepted");
-    const e = { type: "sflow.worker" as const, version: 1 as const, runId: run.id, stepId: id, actor: "codex-12345678", status: "done" as const,
+    const e = { type: "sflow.worker" as const, version: 1 as const, runId: run.id, stepId: id, actor: actorFor(run, id), status: "done" as const,
       result: { summary: id, details: "x".repeat(60000) } };
     tr.rows.push({ seq: tr.rows.length + 1, from: e.actor, body: JSON.stringify({ ...e, proof: eventProof(e, run.steps[id].token) }) });
   }
@@ -195,4 +201,18 @@ test("a created session after unknown launch is adopted without recreating", asy
   const run = setup([{ id: "a" }]); const rt = new FakeRuntime(), tr = new FakeTransport();
   run.steps.a.status = "uncertain"; run.steps.a.uncertainty = "launch"; rt.live.add("a");
   await tick(run, rt, tr); expect(rt.created).toEqual([]); expect(String(run.steps.a.status)).toBe("starting");
+});
+
+test("an actor must match its step's agent; pi and agy actors are accepted", () => {
+  const run = setup([{ id: "a", agent: "pi" }, { id: "b", agent: "agy" }, { id: "c", agent: "claude" }]);
+  for (const id of ["a", "b", "c"]) run.steps[id].status = "starting";
+  const tr = new FakeTransport();
+  tr.report(run, "c", "accepted", "codex-12345678"); reconcile(run, tr.rows); expect(run.steps.c.actor).toBeUndefined();
+  tr.rows = []; tr.report(run, "b", "accepted", `agy-${run.id.slice(0, 8)}-a`); reconcile(run, tr.rows); expect(run.steps.b.actor).toBeUndefined();
+  tr.rows = [];
+  for (const id of ["a", "b", "c"]) tr.report(run, id, "accepted");
+  reconcile(run, tr.rows);
+  expect(run.steps.a.actor).toBe("pi-01a1386a-5b57-72eb-9178-7f54f0dd7686");
+  expect(run.steps.b.actor).toBe(`agy-${run.id.slice(0, 8)}-b`);
+  expect(run.steps.c.actor).toBe("claude-12345678");
 });

@@ -11,11 +11,12 @@ function context() {
   const run = loadRun(id), state = run.steps[stepId];
   if (!state || token.length !== state.token.length || !timingSafeEqual(Buffer.from(token), Buffer.from(state.token))) throw new Error("invalid worker capability");
   if (["pending", "dispatching", "cancelled"].includes(state.status)) throw new Error("step is not eligible to execute");
-  return { run, state, stepId, token };
+  const step = run.workflow.steps.find(s => s.id === stepId)!;
+  return { run, state, step, stepId, token };
 }
 export async function workerTask(transport: Transport) {
-  const { run, state, stepId, token } = context();
-  const actor = await transport.whoami();
+  const { run, state, step, stepId, token } = context();
+  const actor = await transport.whoami(step.agent, { runId: run.id, stepId });
   if (state.actor && actor !== state.actor) throw new Error("worker identity changed");
   const rows = await transport.read(run.channel, actor);
   const claimedElsewhere = rows.some(row => {
@@ -35,12 +36,12 @@ export async function workerTask(transport: Transport) {
   return parseBody(tasks[0]);
 }
 export async function workerReport(transport: Transport, result: unknown) {
-  const { run, state, stepId, token } = context();
+  const { run, state, step, stepId, token } = context();
   if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("result must be a JSON object");
   const r = result as Record<string, unknown>;
   if (!["done", "failed", "blocked"].includes(String(r.status)) || typeof r.summary !== "string" || !r.summary.trim()) throw new Error("result needs status done/failed/blocked and a non-empty summary");
   if (Buffer.byteLength(JSON.stringify(r)) > 64 * 1024) throw new Error("report exceeds 64 KiB; use artifact paths");
-  const actor = await transport.whoami();
+  const actor = await transport.whoami(step.agent, { runId: run.id, stepId });
   if (state.actor && actor !== state.actor) throw new Error("worker identity changed");
   const rows = await transport.read(run.channel, actor);
   const events = rows.filter(row => { const e = parseBody(row) as WorkerEvent | null; return e?.type === "sflow.worker" && e.runId === run.id && e.stepId === stepId && row.from === e.actor && validProof(e, token); }).map(parseBody) as WorkerEvent[];

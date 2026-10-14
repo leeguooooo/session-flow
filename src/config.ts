@@ -1,7 +1,7 @@
 import { isAbsolute, resolve } from "node:path";
 import { statSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import type { Step, Workflow } from "./types";
+import { AGENTS, type Agent, type Step, type Workflow } from "./types";
 
 const ID = /^[a-z][a-z0-9-]{0,39}$/;
 function object(value: unknown): Record<string, unknown> {
@@ -21,7 +21,7 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
   const steps: Step[] = o.steps.map((value) => {
     const s = object(value);
     if (typeof s.id !== "string" || !ID.test(s.id)) throw new Error("invalid step id");
-    if (s.agent !== "claude" && s.agent !== "codex") throw new Error(`${s.id}: agent must be claude or codex`);
+    if (!AGENTS.includes(s.agent as Agent)) throw new Error(`${s.id}: agent must be one of ${AGENTS.join(", ")}`);
     if (typeof s.prompt !== "string" || !s.prompt.trim() || Buffer.byteLength(s.prompt) > 64 * 1024) throw new Error(`${s.id}: invalid prompt`);
     if (s.model !== undefined && (typeof s.model !== "string" || !s.model.trim() || s.model.startsWith("-"))) throw new Error(`${s.id}: invalid model`);
     if (typeof s.cwd !== "string" || !s.cwd) throw new Error(`${s.id}: cwd is required`);
@@ -42,7 +42,7 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
         if (project === root || project.startsWith(root + "/") || root.startsWith(project + "/")) throw new Error(`${s.id}: read-only project overlaps protocol write roots`);
       }
     }
-    return { id: s.id, agent: s.agent, model: s.model as string | undefined, prompt: s.prompt, cwd,
+    return { id: s.id, agent: s.agent as Agent, model: s.model as string | undefined, prompt: s.prompt, cwd,
       dependsOn: deps as string[], policy, worktree: s.worktree as boolean | undefined,
       timeoutSeconds: integer(s.timeoutSeconds, 1800, 10, 86400),
       readyTimeoutSeconds: integer(s.readyTimeoutSeconds, 90, 5, 600) };

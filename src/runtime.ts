@@ -56,6 +56,17 @@ Report once using ${cliText} report --json '<JSON>' (or --json - with JSON on st
       if (step.policy === "read-only") argv.push("--disallowedTools", "Edit,Write,NotebookEdit");
       if (step.model) argv.push("--model", step.model);
       argv.push("--", prompt);
+    } else if (step.agent === "pi") {
+      // Pi has no per-tool approvals: read-only removes its edit/write tools, but bash stays available.
+      argv = ["pi"];
+      if (step.policy === "read-only") argv.push("--exclude-tools", "edit,write");
+      if (step.model) argv.push("--model", step.model);
+      argv.push("--", prompt);
+    } else if (step.agent === "agy") {
+      // Antigravity keeps its own tool approvals; the protocol, step and OCS directories join its workspace.
+      argv = ["agy", "--add-dir", commonCwd, "--add-dir", dir, "--add-dir", process.env.OCS_HOME ?? join(homedir(), ".ocs")];
+      if (step.model) argv.push("--model", step.model);
+      argv.push("--prompt-interactive", prompt);
     } else {
       argv = ["codex", "--no-alt-screen", "--no-daemon", "--sandbox", "workspace-write",
         "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",

@@ -33,6 +33,8 @@ export interface StepState {
   uncertainty?: "dispatch" | "launch" | "worker";
   finishedAt?: number;
   acceptedAt?: number;
+  // Last time the worker was seen waiting on a user prompt; readiness restarts from here.
+  promptAt?: number;
   prefixGroup?: string;
   contextBytes?: number;
   dependencyBytes?: number;
@@ -79,6 +81,8 @@ export interface SessionRuntime {
   create(run: Run, step: Step): Promise<void>;
   exists(run: Run, stepId: string): Promise<boolean>;
   stop(run: Run, stepId: string): Promise<void>;
+  // True while the worker's TUI shows a menu for the user (trust, approval, login).
+  waitingOnPrompt?(run: Run, stepId: string): Promise<boolean>;
 }
 export interface Transport {
   read(channel: string, as: string): Promise<Message[]>;

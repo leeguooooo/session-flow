@@ -6,6 +6,7 @@ import { parseWorkflow } from "../src/config";
 import { createRun } from "../src/store";
 import { TmuxRuntime } from "../src/runtime";
 import { cleanEnv, command } from "../src/process";
+import { parseMenu, menuKeys } from "../src/prompt";
 
 const cleanup: string[] = [];
 const oldPath = process.env.PATH;
@@ -82,4 +83,24 @@ test("workflows accept pi and agy steps and reject unknown agents", () => {
   expect(wf("pi").steps[0].agent).toBe("pi");
   expect(wf("agy").steps[0].agent).toBe("agy");
   expect(() => wf("hermes")).toThrow("agent must be one of claude, codex, pi, agy");
+});
+
+test.skipIf(!Bun.which("tmux"))("a waiting menu is read from the pane and answered with keys", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sf-runtime-")); cleanup.push(root);
+  const bin = join(root, "bin"), project = join(root, "project"); mkdirSync(bin); mkdirSync(project);
+  process.env.SFLOW_HOME = join(root, "state"); process.env.PATH = bin + ":" + oldPath;
+  writeFileSync(join(bin, "agy"), `#!/bin/sh\nprintf 'Run this command?\\n> 1. Yes, run command\\n  2. No, cancel\\n\\n  Navigate\\n'\nIFS= read -r line\nprintf '%s' "$line" > answered.txt\nwhile :; do sleep 1; done\n`);
+  chmodSync(join(bin, "agy"), 0o700);
+  const run = createRun(parseWorkflow({ version: 1, name: "native-test", steps: [{ id: "a", agent: "agy", cwd: project, prompt: "test" }] }, root));
+  cleanup.push(join(run.socket, ".."));
+  const rt = new TmuxRuntime(["/bin/true"]);
+  try {
+    run.steps.a.status = "launching"; await rt.create(run, run.workflow.steps[0]);
+    let menu = null;
+    for (let i = 0; i < 100 && !menu; i++) { menu = parseMenu(await rt.screen(run, "a")); if (!menu) await Bun.sleep(50); }
+    expect(menu!.options).toEqual(["Yes, run command", "No, cancel"]);
+    await rt.keys(run, "a", menuKeys(menu!, 2));
+    // A shell `read` sees the arrow as its escape sequence; the TUIs move their selection with it.
+    expect(await readWhenWritten(join(run.steps.a.cwd!, "answered.txt"))).toContain("[B");
+  } finally { await rt.stop(run, "a"); }
 });

@@ -13,6 +13,7 @@ import { runMetrics } from "./metrics";
 import { resolveResult } from "./results";
 import { preflight, requiredTools } from "./preflight";
 import { installSkill } from "./skill";
+import { parseMenu, menuKeys } from "./prompt";
 import { maybeNotice, runUpdateCheck, upgrade, UPDATE_CHECK_COMMAND } from "./upgrade";
 import pkg from "../package.json";
 
@@ -41,6 +42,8 @@ sflow status <run-id>                reconcile explicit worker reports, print JS
 sflow stats <run-id>                 message counts and context bytes (not tokens)
 sflow result <run-id> <step-id>       read one complete result on demand
 sflow attach <run-id> <step-id>       inspect/interact with one owned native session
+sflow answer <run-id> <step-id> <prompt-id> <n>
+                                     choose option n of the prompt status reported
 sflow logs <run-id> <step-id>         capture its terminal output
 sflow stop <run-id>                  stop only this run's workers; retain artifacts
 sflow task                          worker: read assignment and report acceptance
@@ -79,7 +82,7 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
     const run = createRun(workflow); print({ runId: run.id, channel: run.channel });
     const unlock = lockRun(run);
     try { await drive(run, runtime, transport); } finally { unlock(); }
-    print(publicRun(run)); if (run.status !== "done") { console.error(`Inspect logs/attach, then: sflow resume ${run.id}`); process.exitCode = 2; } return;
+    print(publicRun(run)); if (run.status !== "done") { console.error(`Answer any prompt in sflow status (or logs/attach), then: sflow resume ${run.id}`); process.exitCode = 2; } return;
   }
   if (!arg) throw new Error("run id required");
   const run = loadRun(arg);
@@ -100,12 +103,36 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
     const child = spawn(argv[0], argv.slice(1), { stdio: "inherit" });
     await new Promise<void>((res, rej) => { child.on("error", rej); child.on("exit", c => { process.exitCode = c ?? 1; res(); }); }); return;
   }
+  if (cmd === "answer") {
+    // The prompt id pins the exact question and options the user saw; a changed screen is refused.
+    const [step, id, choice] = rest;
+    if (rest.length !== 3 || !run.steps[step]) throw new Error("answer <run-id> <step-id> <prompt-id> <n>");
+    if (!await runtime.exists(run, step)) throw new Error(`${step} has no live session`);
+    const menu = parseMenu(await runtime.screen(run, step));
+    if (!menu) throw new Error(`${step} is not waiting on a prompt now; check sflow status ${run.id}`);
+    if (menu.id !== id) throw new Error(`${step} now shows a different prompt (${menu.id}); show it to the user again: ${JSON.stringify(menu)}`);
+    const keys = menuKeys(menu, Number(choice));
+    await runtime.keys(run, step, keys);
+    await Bun.sleep(500);
+    const after = parseMenu(await runtime.screen(run, step));
+    print({ step, answered: menu.options[Number(choice) - 1], ...(after ? { nextPrompt: after } : {}) }); return;
+  }
   if (rest.length) throw new Error("unexpected arguments");
   if (cmd === "status" || cmd === "stats") {
     // Read-only observer; the driver owns durable state mutations.
     const rows = await transport.read(run.channel, `sflow-${run.id}`);
     reconcile(run, rows);
-    if (cmd === "stats") print(runMetrics(run, rows)); else print(publicRun(run)); return;
+    if (cmd === "stats") { print(runMetrics(run, rows)); return; }
+    const view = publicRun(run);
+    for (const [step, state] of Object.entries(run.steps)) {
+      if (!state.session || ["done", "failed", "blocked", "cancelled"].includes(state.status)) continue;
+      try {
+        if (!await runtime.exists(run, step)) continue;
+        const menu = parseMenu(await runtime.screen(run, step));
+        if (menu) Object.assign(view.steps[step], { prompt: { ...menu, answer: `sflow answer ${run.id} ${step} ${menu.id} <n>` } });
+      } catch {}
+    }
+    print(view); return;
   }
   if (cmd !== "resume" && cmd !== "stop") throw new Error(`unknown command: ${cmd}`);
   if (cmd === "stop") {
@@ -146,6 +173,6 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
       run.status = "running"; await drive(run, runtime, transport);
     }
   } finally { unlock(); }
-  print(publicRun(run)); if (String(run.status) !== "done" && cmd === "resume") { console.error(`Inspect logs/attach, then: sflow resume ${run.id}`); process.exitCode = 2; }
+  print(publicRun(run)); if (String(run.status) !== "done" && cmd === "resume") { console.error(`Answer any prompt in sflow status (or logs/attach), then: sflow resume ${run.id}`); process.exitCode = 2; }
 }
 main().catch(e => { console.error(`sflow: ${e.message ?? e}`); process.exitCode = 1; });

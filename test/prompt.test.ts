@@ -1,0 +1,77 @@
+import { test, expect } from "bun:test";
+import { parseMenu, menuKeys } from "../src/prompt";
+
+// Screens recorded from real runs (paths shortened).
+const claudeTrust = `────────────────────────────────────────────────
+ Accessing workspace:
+
+ ~/…/runs/76c780c4/.protocol
+
+ Quick safety check: Is this a project you created or one you trust?
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel`;
+
+const agyApproval = `● Ran 4 commands (1 failed) (ctrl+o to expand)
+
+Command
+────────────────────────────────────────────────
+
+Requesting permission for:
+   ls -la ~/…/runs/cb12bdf2
+
+Run this command?
+> 1. Yes, run command
+  2. Yes, and always allow in this conversation for commands that start with 'ls'
+  3. Yes, and always allow for commands that start with 'ls' (Persist to settings.json)
+  4. No, cancel
+
+  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command
+esc to cancel                                   Gemini 3.8 Flash · high`;
+
+const codexIdle = `› Session Flow worker. Run '~/…/double/worker' task once;
+  execute only its returned assignment. Stop if it fails.
+
+• Working (8s • esc to interrupt)
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol medium · ~/…/.protocol`;
+
+test("reads Claude's unnumbered folder-trust menu", () => {
+  const menu = parseMenu(claudeTrust)!;
+  expect(menu.options).toEqual(["No, exit", "Yes, I trust this folder"]);
+  expect(menu.selected).toBe(0);
+  expect(menu.question[0]).toBe("Accessing workspace:");
+  expect(menuKeys(menu, 2)).toEqual(["Down", "Enter"]);
+  expect(menuKeys(menu, 1)).toEqual(["Enter"]);
+});
+
+test("reads agy's numbered approval menu", () => {
+  const menu = parseMenu(agyApproval)!;
+  expect(menu.options).toHaveLength(4);
+  expect(menu.options[1]).toStartWith("Yes, and always allow in this conversation");
+  expect(menu.question).toContain("Run this command?");
+  expect(menuKeys(menu, 2)).toEqual(["Down", "Enter"]);
+  expect(menuKeys({ ...menu, selected: 3 }, 1)).toEqual(["Up", "Up", "Up", "Enter"]);
+  expect(() => menuKeys(menu, 5)).toThrow("choose 1..4");
+  expect(() => menuKeys(menu, 0)).toThrow();
+});
+
+test("an input box or worker prompt is not a menu", () => {
+  expect(parseMenu(codexIdle)).toBeNull();
+  expect(parseMenu(claudeTrust.replace("Enter to confirm · Esc to cancel", ""))).toBeNull();
+});
+
+test("the prompt id changes when the question or options change", () => {
+  const a = parseMenu(agyApproval)!, b = parseMenu(agyApproval.replace("ls -la", "rm -rf"))!;
+  expect(a.id).toMatch(/^[0-9a-f]{8}$/);
+  expect(parseMenu(agyApproval)!.id).toBe(a.id);
+  expect(b.id).not.toBe(a.id);
+});

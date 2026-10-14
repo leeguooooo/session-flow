@@ -74,10 +74,14 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
       saveRun(run);
     }
     if (["starting", "running"].includes(s.status)) {
-      if (s.status === "starting" && Date.now() - (s.startedAt ?? Date.now()) > step.readyTimeoutSeconds * 1000) {
-        s.status = "blocked"; s.error = `no acceptance yet; inspect with sflow attach ${run.id} ${step.id} (trust/permission/login prompts need human input)`; saveRun(run);
-      } else if (Date.now() - (s.startedAt ?? Date.now()) > step.timeoutSeconds * 1000) {
+      // A prompt the user is still answering keeps readiness open, and readiness restarts once
+      // it is answered; the step timeout still bounds the whole wait.
+      if (s.status === "starting" && await runtime.waitingOnPrompt?.(run, step.id)) { s.promptAt = Date.now(); saveRun(run); }
+      const readyFrom = Math.max(s.startedAt ?? Date.now(), s.promptAt ?? 0);
+      if (Date.now() - (s.startedAt ?? Date.now()) > step.timeoutSeconds * 1000) {
         s.status = "blocked"; s.error = "step timed out; worker retained for inspection"; saveRun(run);
+      } else if (s.status === "starting" && Date.now() - readyFrom > step.readyTimeoutSeconds * 1000) {
+        s.status = "blocked"; s.error = `no acceptance yet; check sflow status ${run.id} for a waiting prompt or sflow logs ${run.id} ${step.id}`; saveRun(run);
       } else if (!await runtime.exists(run, step.id)) {
         s.status = "uncertain"; s.uncertainty = "worker"; s.error = "worker exited without an explicit completion report"; saveRun(run);
       }

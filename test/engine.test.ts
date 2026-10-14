@@ -85,10 +85,27 @@ test("exited worker cannot complete a task and prevents downstream dispatch", as
   await tick(run, rt, tr); rt.live.delete("a"); await tick(run, rt, tr);
   expect(run.steps.a.status).toBe("uncertain"); expect(run.steps.b.status).toBe("blocked"); expect(rt.created).toEqual(["a"]);
 });
-test("blocked live worker still consumes concurrency; trust timeout gives attach instructions", async () => {
+test("blocked live worker still consumes concurrency; trust timeout points at status", async () => {
   const run = setup([{ id: "a", readyTimeoutSeconds: 5 }, { id: "b" }], 1); const rt = new FakeRuntime(), tr = new FakeTransport();
   await tick(run, rt, tr); run.steps.a.startedAt = Date.now() - 6000; await tick(run, rt, tr);
-  expect(run.steps.a.status).toBe("blocked"); expect(run.steps.a.error).toContain("attach"); expect(rt.created).toEqual(["a"]); expect(run.status).toBe("blocked");
+  expect(run.steps.a.status).toBe("blocked"); expect(run.steps.a.error).toContain(`sflow status ${run.id}`); expect(rt.created).toEqual(["a"]); expect(run.status).toBe("blocked");
+});
+test("a prompt the user is answering keeps readiness open until the step timeout", async () => {
+  const run = setup([{ id: "a", readyTimeoutSeconds: 5, timeoutSeconds: 60 }]);
+  const rt = new (class extends FakeRuntime { prompt = true; async waitingOnPrompt() { return this.prompt; } })(), tr = new FakeTransport();
+  await tick(run, rt, tr); run.steps.a.startedAt = Date.now() - 6000; await tick(run, rt, tr);
+  expect(run.steps.a.status).toBe("starting");
+  // Answered: the worker gets a fresh readiness window from the last sighting of the prompt.
+  rt.prompt = false; run.steps.a.promptAt = Date.now() - 3000; await tick(run, rt, tr);
+  expect(run.steps.a.status).toBe("starting");
+  run.steps.a.promptAt = Date.now() - 6000; await tick(run, rt, tr);
+  expect(run.steps.a.status).toBe("blocked"); expect(run.steps.a.error).toContain("no acceptance");
+  const stuck = setup([{ id: "a", readyTimeoutSeconds: 5, timeoutSeconds: 60 }]); rt.prompt = true;
+  await tick(stuck, rt, tr); stuck.steps.a.startedAt = Date.now() - 61000; await tick(stuck, rt, tr);
+  expect(stuck.steps.a.status).toBe("blocked"); expect(stuck.steps.a.error).toContain("timed out");
+  const fresh = setup([{ id: "a", readyTimeoutSeconds: 5 }]); rt.prompt = false;
+  await tick(fresh, rt, tr); fresh.steps.a.startedAt = Date.now() - 6000; await tick(fresh, rt, tr);
+  expect(fresh.steps.a.status).toBe("blocked");
 });
 test("one driver owns each run", () => {
   const run = setup([{ id: "a" }]); const unlock = lockRun(run);

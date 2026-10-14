@@ -75,6 +75,7 @@ head -n 5 /tmp/sflow-<name>.log      # {"runId": "...", "channel": "sflow-..."}
 sflow status <run-id>                # per-step status and short summaries
 sflow result <run-id> <step-id>      # one complete, hash-verified result
 sflow logs <run-id> <step-id>        # what that worker's terminal shows now
+sflow answer <run-id> <step-id> <prompt-id> <n>   # pick option n of a waiting prompt (after the user chose)
 sflow stats <run-id>                 # message counts and forwarded bytes
 ```
 
@@ -83,13 +84,28 @@ Poll `status` at a sensible interval (a minute or more), not in a tight loop.
 ## When a step is stuck
 
 New sessions can stop at a folder-trust prompt, a login, or a tool approval
-(agy asks before every command). `sflow logs <run-id> <step-id>` shows it. The
-approval belongs to the user: tell them which step is waiting and ask them to
-run `sflow attach <run-id> <step-id>` and answer it. Do not approve on their
-behalf or add bypass flags.
+(agy asks before every command). `sflow status` shows it on that step as
+`prompt`: the question, the options in the TUI's own words, and an `id`. Check
+`status` about 15 seconds after starting and again while steps are launching;
+a prompt left unanswered past `readyTimeoutSeconds` (default 90) stops the run
+until `sflow resume`.
+
+The choice belongs to the user, but they answer in this conversation:
+
+1. Show the step, the question and the numbered options exactly as `prompt`
+   gives them. Say what the choice does (for example "trusts this run's
+   protocol folder" or "lets agy run `ls` for the rest of its conversation").
+2. Wait for the user to pick. Do not choose for them, do not pre-select the
+   "always allow" options, and do not treat silence as yes.
+3. Run `sflow answer <run-id> <step-id> <prompt-id> <n>`. It refuses if the
+   screen now shows a different prompt; show the new one and ask again. Its
+   output names any follow-up prompt.
+
+The user can still answer directly with `sflow attach <run-id> <step-id>`.
+Never add bypass flags.
 
 - Ctrl-C or a killed driver leaves workers running: `sflow resume <run-id>`.
-- After a readiness timeout, handle the prompt, then `sflow resume <run-id>`.
+- After a readiness timeout, answer the prompt as above, then `sflow resume <run-id>`.
 - `sflow stop <run-id>` stops this run's workers and keeps their records.
 - A `failed` or `blocked` report is final for that run. Retry with a new run; sflow never resends an uncertain assignment by itself.
 

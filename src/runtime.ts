@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { checked, command, cleanEnv, quote } from "./process";
 import { saveRun } from "./store";
+import { parseMenu } from "./prompt";
 import type { Run, Step, SessionRuntime } from "./types";
 
 export class TmuxRuntime implements SessionRuntime {
@@ -93,6 +94,16 @@ Report once using ${cliText} report --json '<JSON>' (or --json - with JSON on st
       writeFileSync(join(run.dir, id, "terminal.txt"), output, { mode: 0o600 });
       await checked([this.binary, "-S", run.socket, "kill-session", "-t", `=${run.steps[id].session}`]);
     }
+  }
+  async screen(run: Run, id: string) {
+    return await checked([this.binary, "-S", run.socket, "capture-pane", "-p", "-t", `${run.steps[id].session}:0.0`]);
+  }
+  async keys(run: Run, id: string, keys: string[]) {
+    // One key per call with a short pause: TUIs redraw between keys and can drop a burst.
+    for (const key of keys) { await checked([this.binary, "-S", run.socket, "send-keys", "-t", `${run.steps[id].session}:0.0`, key]); await Bun.sleep(120); }
+  }
+  async waitingOnPrompt(run: Run, id: string) {
+    try { return parseMenu(await this.screen(run, id)) !== null; } catch { return false; }
   }
   attachArgs(run: Run, id: string) { return [this.binary, "-S", run.socket, "attach-session", "-t", `=${run.steps[id].session}`]; }
 }

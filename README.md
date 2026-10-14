@@ -34,15 +34,30 @@ Install and authenticate the agent CLIs your workflow uses (`claude`, `codex`, `
 ## Run
 
 ```sh
-sflow validate workflow.json
-sflow run workflow.json
-# The first output prints a runId. In another terminal:
-sflow status <run-id>
-sflow stats <run-id>
+sflow doctor                         # tmux, ocs, agent CLIs and their sign-in; no model calls
+sflow init implement-review --write --task "Add a --verbose flag"   # or write workflow.json yourself
+sflow run .sflow/implement-review.json
+```
+
+`sflow init` writes a plain workflow for a common shape: `review`, `implement-review`, `plan-implement-review` (both need `--write`, since an agent changes code in a new git worktree), or `fan-out` (several agents in parallel, one joins). It prints the agents, directories, dependencies and write policy; edit the file or pass `--implement`/`--review`/`--agents` to change agents. Anything else is a hand-written workflow (below); in an agent conversation, the `sflow` skill writes it from your description.
+
+While it runs, `sflow run` prints each step's observed changes (starting, accepted, done, blocked) and a reminder after two quiet minutes. When a worker shows a trust, login or approval prompt, the question and numbered options appear in the same terminal: type a number and Enter to answer. At the end it prints a review: per step what the worker reported (marked as not verified), what sflow saw in each worktree with git, and what is left to do. Progress goes to stderr; stdout keeps the JSON it always had (run ID first, final state last). `--progress json` prints NDJSON events instead, `--progress none` nothing.
+
+From another terminal or an agent:
+
+```sh
+sflow status <run-id>                # JSON; a waiting prompt appears on its step
+sflow answer <run-id> <step-id> <prompt-id> <n>
+sflow review <run-id> [--json]
 sflow result <run-id> <step-id>
 sflow logs <run-id> <step-id>
 sflow attach <run-id> <step-id>
+sflow stats <run-id>
 ```
+
+A real change from start to finish, with worktree review and recovery: [docs/dev-workflow.md](docs/dev-workflow.md).
+
+A hand-written workflow looks like this:
 
 ```json
 {
@@ -126,7 +141,9 @@ records instead of misreading referenced results.
 
 ## Trust, approvals, and recovery
 
-New native sessions can prompt for directory trust, login, or tool approval. `sflow status` shows such a prompt on its step (question, options and an id), so the agent driving the run can ask you in its conversation and pick your choice with `sflow answer <run-id> <step-id> <prompt-id> <n>`; the id pins the exact prompt you saw, and a changed screen is refused. You can also answer yourself with `sflow attach`. While a prompt is on screen, the readiness timeout waits (up to the step timeout). Standard approvals remain enabled; this version does not promise unattended execution. For Claude, read-only forbids file-edit tools but shell actions still use native permission gates. Pi read-only steps cannot edit or write files through Pi's tools but can still run shell commands. agy asks before every command; approve its wrapper with "always allow in this conversation" to avoid a second prompt for the report. Codex review workers can write protocol/results and OCS messages, while the reviewed repository stays outside their sandbox write roots.
+New native sessions can prompt for directory trust, login, or tool approval. sflow never answers one itself. You answer in the `sflow run` terminal by typing the option number, or the agent driving the run asks you in its conversation and passes your choice with `sflow answer <run-id> <step-id> <prompt-id> <n>` (the prompt id comes from `sflow status`); either way the answer is sent only if the screen still shows the exact prompt you saw. `sflow attach` still works. While a prompt is on screen the readiness timeout waits (up to the step timeout) and restarts once it is answered; if the driver already stopped, `sflow resume` gives a still-open worker a fresh readiness window. When a worker does not accept in time, the error quotes what its screen shows (a backend or sign-in error, for example) or says the cause is unknown; it only mentions a prompt when one is on screen.
+
+Read-only Claude steps start in one empty folder sflow owns, `~/.local/state/session-flow/workspaces/claude`, so Claude asks to trust it once per machine instead of once per run. That trust covers only this folder, which holds no project code; run files are passed by absolute path. Write steps start in a new worktree, so Claude or Codex asks about that folder (Codex applies the trust to the repository root). Standard approvals remain enabled; this version does not promise unattended execution. For Claude, read-only forbids file-edit tools but shell actions still use native permission gates. Pi read-only steps cannot edit or write files through Pi's tools but can still run shell commands. agy asks before every command; approve its wrapper with "always allow in this conversation" to avoid a second prompt for the report. Codex review workers can write protocol/results and OCS messages, while the reviewed repository stays outside their sandbox write roots.
 
 Ctrl-C stops the driver and leaves workers available. Keep the printed run ID:
 

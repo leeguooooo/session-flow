@@ -21,11 +21,28 @@ sflow version || curl -fsSL https://raw.githubusercontent.com/leeguooooo/session
 ```
 
 `sflow run` needs tmux, OCS 0.8.0+ and the CLIs of the agents the workflow
-names. It checks all of them before creating anything and prints install
-commands for whatever is missing. Pi workers also need the OCS Pi extension
-(`ocs doctor --fix`). macOS/Linux only (WSL works).
+names. `sflow doctor [workflow.json]` checks them, plus Claude/Codex sign-in
+and the OCS Pi extension, without calling a model; show the user any `FAIL`
+line and its fix. `sflow run` repeats the essential checks before creating
+anything. macOS/Linux only (WSL works).
 
 ## Write the workflow
+
+For a common shape, let sflow write it and show the user the plan it prints:
+
+```sh
+sflow init review --task "<what to look at>" --cwd <project>
+sflow init implement-review --write --task "<the change>" --cwd <project>
+sflow init plan-implement-review --write --task "<the change>" --cwd <project>
+sflow init fan-out --task "<question>" --agents claude,codex,pi --cwd <project>
+```
+
+Agents default to Codex implementing and Claude planning/reviewing; change them
+with `--plan`, `--implement`, `--review`, `--join`. `--write` lets an agent
+change code in a new git worktree; add it only when the user asked for a code
+change, and say so. The file lands in `.sflow/<preset>.json` (or `--out`).
+
+Otherwise write the JSON from the user's description:
 
 ```json
 {
@@ -61,15 +78,18 @@ sflow validate workflow.json
 ## Run it
 
 `sflow run` stays in the foreground until the workflow finishes, which can take
-many minutes. Start it in the background and keep its output, because the first
-line prints the run ID:
+many minutes. Start it in the background. stdout is JSON (the run ID first, the
+final state last); stderr is a readable progress log and the closing review:
 
 ```sh
-sflow run workflow.json > /tmp/sflow-<name>.log 2>&1 &
-head -n 5 /tmp/sflow-<name>.log      # {"runId": "...", "channel": "sflow-..."}
+sflow run workflow.json > /tmp/sflow-<name>.json 2> /tmp/sflow-<name>.log &
+head -n 4 /tmp/sflow-<name>.json     # {"runId": "...", "channel": "sflow-..."}
+tail -n 20 /tmp/sflow-<name>.log     # what has happened so far
 ```
 
-(In Claude Code, prefer the Bash tool's background mode.) Then watch it:
+(In Claude Code, prefer the Bash tool's background mode.) A run started from a
+terminal by the user accepts typed answers to prompts; one you start in the
+background does not, so answer through `sflow answer` as below. Then watch it:
 
 ```sh
 sflow status <run-id>                # per-step status and short summaries
@@ -77,18 +97,25 @@ sflow result <run-id> <step-id>      # one complete, hash-verified result
 sflow logs <run-id> <step-id>        # what that worker's terminal shows now
 sflow answer <run-id> <step-id> <prompt-id> <n>   # pick option n of a waiting prompt (after the user chose)
 sflow stats <run-id>                 # message counts and forwarded bytes
+sflow review <run-id>                # per step: what was reported, what sflow saw in worktrees, what is left
 ```
 
 Poll `status` at a sensible interval (a minute or more), not in a tight loop.
 
 ## When a step is stuck
 
-New sessions can stop at a folder-trust prompt, a login, or a tool approval
-(agy asks before every command). `sflow status` shows it on that step as
-`prompt`: the question, the options in the TUI's own words, and an `id`. Check
-`status` about 15 seconds after starting and again while steps are launching;
-a prompt left unanswered past `readyTimeoutSeconds` (default 90) stops the run
-until `sflow resume`.
+New sessions can stop at a folder-trust prompt or a login, and running ones at
+a tool approval (Claude asks before shell commands, agy before every command).
+`sflow status` shows it on that step as `prompt`: the question, the options in
+the TUI's own words, and an `id`; the progress log prints the same. Check about
+15 seconds after starting, then each time you poll. While a prompt is on screen
+the run waits for it (up to the step's `timeoutSeconds`). A step that reports
+"no acceptance within …" quotes what its screen showed, or says the cause is
+unknown; do not guess a reason it does not give.
+
+Read-only Claude steps start in `~/.local/state/session-flow/workspaces/claude`,
+so the Claude folder-trust question comes once per machine. Codex asks to trust
+a repository the first time it works in one of its worktrees.
 
 The choice belongs to the user, but they answer in this conversation:
 
@@ -105,15 +132,19 @@ The user can still answer directly with `sflow attach <run-id> <step-id>`.
 Never add bypass flags.
 
 - Ctrl-C or a killed driver leaves workers running: `sflow resume <run-id>`.
-- After a readiness timeout, answer the prompt as above, then `sflow resume <run-id>`.
+- After a readiness timeout, deal with what the error names, then `sflow resume <run-id>`; a still-open worker gets a fresh readiness window and its prompt shows again.
 - `sflow stop <run-id>` stops this run's workers and keeps their records.
 - A `failed` or `blocked` report is final for that run. Retry with a new run; sflow never resends an uncertain assignment by itself.
 
 ## Reporting back
 
-A `done` report is the worker's claim, not proof. Before telling the user the
-work is finished, read the full results (`sflow result`) and, for write steps,
-inspect the worktree diff and check output yourself. Name the run ID, which
+A `done` report is the worker's claim, not proof. Start from `sflow review
+<run-id>`: it lists each step's reported summary and checks (marked as not
+rerun), the files sflow saw change in each worktree, and what is left to do.
+Before telling the user the work is finished, read the full results
+(`sflow result`) and, for write steps, run `git -C <worktree> diff` and the
+checks yourself. Changes stay uncommitted in the worktree; commit, merge or
+remove it only when the user asks (docs/dev-workflow.md in the repo shows how). Name the run ID, which
 agent did each step, and anything still waiting for the user.
 
 Run records live in `~/.local/state/session-flow/runs/<id>` and may contain

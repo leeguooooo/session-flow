@@ -34,15 +34,30 @@ bun run bench:context
 ## 运行
 
 ```sh
-sflow validate workflow.json
-sflow run workflow.json
-# The first output prints a runId. In another terminal:
-sflow status <run-id>
-sflow stats <run-id>
+sflow doctor                         # 检查 tmux、ocs、各 agent 命令行及登录状态，不调用模型
+sflow init implement-review --write --task "加一个 --verbose 参数"   # 也可以自己写 workflow.json
+sflow run .sflow/implement-review.json
+```
+
+`sflow init` 按常见形态生成一份普通的工作流：`review`、`implement-review`、`plan-implement-review`（后两种要加 `--write`，因为会有 agent 在新的 git worktree 里改代码），或 `fan-out`（几个 agent 并行，最后一个汇总）。它会打印每步用的 agent、目录、依赖和写入策略；想换 agent 就改文件，或传 `--implement`/`--review`/`--agents`。其他形态就自己写工作流（见下文）；在 agent 对话里，`sflow` 技能会根据你的描述写好。
+
+运行期间，`sflow run` 会打印每个步骤实际观察到的变化（启动、接单、完成、受阻），两分钟没动静会提醒一次。某个 worker 弹出信任、登录或审批提示时，问题和带编号的选项会直接显示在同一个终端里，输入数字回车就能回答。结束时会打印一份验收摘要：每步 worker 报告了什么（标明未经核实）、sflow 用 git 在 worktree 里实际看到了什么、还剩什么要处理。进度写到 stderr；stdout 仍是原来的 JSON（第一段是 run ID，最后一段是最终状态）。`--progress json` 改为输出 NDJSON 事件，`--progress none` 不输出进度。
+
+在另一个终端或由 agent 调用：
+
+```sh
+sflow status <run-id>                # JSON；等待中的提示会出现在对应步骤上
+sflow answer <run-id> <step-id> <prompt-id> <n>
+sflow review <run-id> [--json]
 sflow result <run-id> <step-id>
 sflow logs <run-id> <step-id>
 sflow attach <run-id> <step-id>
+sflow stats <run-id>
 ```
+
+从头到尾改一次真实代码（含 worktree 审查和故障恢复）：[docs/dev-workflow.zh-CN.md](docs/dev-workflow.zh-CN.md)。
+
+手写的工作流长这样：
 
 ```json
 {
@@ -106,7 +121,9 @@ worker 通过机器可读的 OCS 事件上报"已接受"和唯一一条最终结
 
 ## 信任、审批与恢复
 
-新开的原生会话可能会弹出目录信任、登录或工具审批的提示。`sflow status` 会在对应步骤上显示这个提示（问题、选项和一个 id），驱动这次运行的 agent 可以直接在对话里问你，再用 `sflow answer <run-id> <step-id> <prompt-id> <n>` 替你选；id 锁定的是你看到的那个提示，屏幕上的提示变了就会拒绝执行。你也可以自己用 `sflow attach` 进去处理。提示还在屏幕上时，就绪超时会继续等（最长到步骤超时）。标准审批保持开启；这个版本不承诺无人值守执行。对 Claude 来说，read-only 禁用文件编辑工具，但 shell 操作仍走原生的权限确认。Pi 的只读步骤不能通过 Pi 的工具编辑或写文件，但仍能执行 shell 命令。agy 每条命令执行前都会询问；给调度脚本选「本次对话内始终允许」，交结果时就不会再问一次。Codex 评审 worker 可以写协议/结果文件和 OCS 消息，被评审的仓库则不在它的沙箱可写目录里。
+新开的原生会话可能会弹出目录信任、登录或工具审批的提示，sflow 从不自己替你选。你可以在 `sflow run` 的终端里输入选项编号回答；也可以由驱动这次运行的 agent 在对话里问你，再用 `sflow answer <run-id> <step-id> <prompt-id> <n>` 把你的选择传过去（prompt id 来自 `sflow status`）。两种方式都只在屏幕上仍是你看到的那个提示时才发送按键。`sflow attach` 照样能用。提示还在屏幕上时，就绪超时会继续等（最长到步骤超时），回答后重新计时；如果驱动器已经停了，`sflow resume` 会给仍开着的 worker 一个新的就绪窗口。worker 没按时接单时，错误信息会引用它屏幕上看到的内容（比如后端或登录错误），认不出就写"原因未知"；只有屏幕上真有提示时才会提到提示。
+
+只读的 Claude 步骤统一在 sflow 自己的空目录 `~/.local/state/session-flow/workspaces/claude` 里启动，所以 Claude 每台机器只问一次信任，不再每次运行都问。这次信任只覆盖这个目录，里面没有项目代码；运行文件都按绝对路径传入。写入步骤在新建的 worktree 里启动，所以 Claude 或 Codex 会问这个目录（Codex 会把信任应用到仓库根目录）。标准审批保持开启；这个版本不承诺无人值守执行。对 Claude 来说，read-only 禁用文件编辑工具，但 shell 操作仍走原生的权限确认。Pi 的只读步骤不能通过 Pi 的工具编辑或写文件，但仍能执行 shell 命令。agy 每条命令执行前都会询问；给调度脚本选「本次对话内始终允许」，交结果时就不会再问一次。Codex 评审 worker 可以写协议/结果文件和 OCS 消息，被评审的仓库则不在它的沙箱可写目录里。
 
 Ctrl-C 只停掉驱动器，worker 继续保留。记下打印出来的 run ID：
 

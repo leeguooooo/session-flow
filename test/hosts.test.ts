@@ -376,7 +376,8 @@ test("gc keeps fresh mirrors and old runs driven on this host", async () => {
   expect(readdirSync(join(process.env.SFLOW_HOME, "slots"))).toHaveLength(2);
 });
 
-test("gc keeps an old mirror with a real live tmux worker", async () => {
+// Needs a real tmux; CI runners may not have one.
+test.skipIf(!Bun.which("tmux"))("gc keeps an old mirror with a real live tmux worker", async () => {
   process.env.SFLOW_HOME = join(base, "solo");
   const run = gcRun("00000000-0000-0000-0000-000000000004");
   const file = join(run.dir, "run.json"), old = new Date(Date.now() - 8 * 86400_000);

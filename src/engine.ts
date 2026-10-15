@@ -1,3 +1,5 @@
+import { sessionRoot } from "./config";
+import { beginObservation, endObservation } from "./workspace";
 import { saveRun } from "./store";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
@@ -45,11 +47,13 @@ export function reconcile(run: Run, rows: Message[]) {
     if (!state || !validProof(e, state.token) || row.from !== e.actor ||
       !nativeActor(e.actor, run.workflow.steps.find(s => s.id === e.stepId)?.agent, { runId: run.id, stepId: e.stepId })) continue;
     if (state.actor && state.actor !== e.actor) continue;
+    const definition = run.workflow.steps.find(s => s.id === e.stepId)!;
+    if (definition.reuseSession && (run.steps[definition.reuseSession].status !== "done" || run.steps[definition.reuseSession].actor !== e.actor)) continue;
     // Only workers that this driver actually tried to create can report.
     if (["pending", "dispatching", "cancelled", "skipped"].includes(state.status)) continue;
     if (e.status === "accepted") {
       if (["done", "failed", "blocked"].includes(state.status) && state.result) continue;
-      state.actor = e.actor; state.status = "running"; delete state.error;
+      state.actor = e.actor; state.status = "running"; state.lifecycle = "active"; delete state.error;
       state.acceptedAt ??= row.ts && Number.isFinite(Date.parse(row.ts)) ? Date.parse(row.ts) : Date.now();
     } else if (["done", "failed", "blocked"].includes(e.status)) {
       if (!state.actor || !e.result || typeof e.result !== "object" || Array.isArray(e.result)) continue;
@@ -69,7 +73,7 @@ export function reconcile(run: Run, rows: Message[]) {
 export async function tick(run: Run, runtime: SessionRuntime, transport: Transport) {
   if (existsSync(join(run.dir, "cancel.request"))) {
     for (const step of run.workflow.steps) {
-      await runtime.stop(run, step.id);
+      await runtime.stop(run, step.id); run.steps[step.id].lifecycle = "closed";
       if (!finished(run.steps[step.id].status)) run.steps[step.id].status = "cancelled";
     }
     run.status = "cancelled"; saveRun(run); return;
@@ -78,6 +82,11 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
   const rows = await transport.read(run.channel, sender);
   reconcile(run, rows); saveRun(run);
   for (const step of run.workflow.steps) {
+    try { await endObservation(run, step); }
+    catch (e) { run.steps[step.id].status = "blocked"; run.steps[step.id].error = `workspace observation failed: ${String(e)}`; }
+  }
+  saveRun(run);
+  for (const step of run.workflow.steps) {
     const s = run.steps[step.id];
     if (s.status === "blocked" && s.error === "dependency did not complete successfully" && step.dependsOn.every(id => finished(run.steps[id].status))) {
       s.status = "pending"; delete s.error; saveRun(run);
@@ -85,7 +94,9 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
     if (s.status === "launching" || (s.status === "uncertain" && s.uncertainty === "launch")) {
       // Crash between creating the process and recording success: adopting the
       // one exact owned tmux session is safe; creating another is not.
-      if (await runtime.exists(run, step.id)) { s.status = "starting"; delete s.uncertainty; delete s.error; }
+      if (step.reuseSession) {
+        s.status = "uncertain"; s.uncertainty = "launch"; s.error = "continuation delivery unknown; wait for signed acceptance, no automatic resend";
+      } else if (await runtime.exists(run, step.id)) { s.status = "starting"; delete s.uncertainty; delete s.error; }
       else { s.status = "uncertain"; s.uncertainty = "launch"; s.error = "creation outcome unknown; no automatic recreation"; }
       saveRun(run);
     }
@@ -132,14 +143,41 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
     // Let the first matching worker begin its response before a sibling is
     // launched. This only enables compatible caching; it never claims a hit.
     if (group && Object.values(run.steps).some(other => other.prefixGroup === group && other.status === "starting" && Date.now() - (other.startedAt ?? 0) < (run.workflow.prefixWarmupMs ?? 0))) continue;
-    let occupied = Object.values(run.steps).filter(s => active.has(s.status)).length;
-    for (const other of run.workflow.steps) {
-      if (["blocked", "uncertain", "failed"].includes(run.steps[other.id].status) && await runtime.exists(run, other.id)) occupied++;
+    // Stop only a whole worker group with no active or possible future round.
+    const groups = new Map<string, Step[]>();
+    for (const member of run.workflow.steps) {
+      const root = sessionRoot(run.workflow.steps, member);
+      groups.set(root, [...(groups.get(root) ?? []), member]);
     }
-    if (occupied >= run.workflow.concurrency) break;
-    // Completed steps keep their TUI alive for inspection, so stop those owned
-    // processes before launching more: the cap applies to actual workers too.
-    for (const prev of run.workflow.steps) if (finished(run.steps[prev.id].status)) await runtime.stop(run, prev.id);
+    let occupied = 0;
+    for (const members of groups.values()) {
+      const owner = members.find(m => run.steps[m.id].lifecycle === "active") ?? members[0];
+      const live = await runtime.exists(run, owner.id);
+      const needsLater = members.some(m => run.steps[m.id].status === "pending");
+      const busy = members.some(m => active.has(run.steps[m.id].status) || ["blocked", "uncertain", "failed"].includes(run.steps[m.id].status));
+      if (live && !busy && !needsLater) {
+        await runtime.stop(run, owner.id);
+        for (const m of members) run.steps[m.id].lifecycle = "closed";
+      } else if (live) {
+        occupied++;
+        if (!busy) for (const m of members.filter(m => finished(run.steps[m.id].status))) run.steps[m.id].lifecycle = "retained";
+      }
+    }
+    if (!step.reuseSession && occupied >= run.workflow.concurrency) {
+      if (!Object.values(run.steps).some(s => active.has(s.status))) {
+        s.status = "blocked"; s.error = "retained/blocked workers fill concurrency slots; inspect them and use higher concurrency in a new workflow"; saveRun(run);
+      }
+      continue;
+    }
+    if (step.reuseSession && run.steps[step.reuseSession].status !== "done") {
+      s.status = "blocked"; s.error = "reuseSession ancestor did not report done; no continuation"; saveRun(run); continue;
+    }
+    if (step.reuseSession && (!runtime.continue || !await runtime.exists(run, step.id))) {
+      s.status = "uncertain"; s.uncertainty = "worker"; s.error = "retained worker unavailable; no automatic recreation"; saveRun(run); continue;
+    }
+    try { await beginObservation(run, step); } catch (e) {
+      s.status = "blocked"; s.error = `workspace observation failed: ${String(e)}`; saveRun(run); continue;
+    }
     const assignments = rows.filter(r => r.from === sender && isTask(parseBody(r), run, step.id));
     if (assignments.length > 1) { s.status = "uncertain"; s.error = "duplicate assignments found"; saveRun(run); continue; }
     if (!assignments.length) {
@@ -155,13 +193,16 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
       catch (e) { s.status = "uncertain"; s.uncertainty = "dispatch"; s.error = String(e); saveRun(run); continue; }
     }
     s.status = "launching"; s.startedAt = Date.now(); s.prefixGroup = group; saveRun(run);
-    try { await runtime.create(run, step); s.status = "starting"; }
+    try {
+      if (step.reuseSession) await runtime.continue!(run, step); else await runtime.create(run, step);
+      s.status = "starting"; s.lifecycle = "active";
+    }
     catch (e) { s.status = "uncertain"; s.uncertainty = "launch"; s.error = String(e); }
     saveRun(run);
   }
   if (Object.values(run.steps).every(s => finished(s.status))) {
     run.status = "done";
-    for (const step of run.workflow.steps) await runtime.stop(run, step.id);
+    for (const step of run.workflow.steps) { await runtime.stop(run, step.id); run.steps[step.id].lifecycle = "closed"; }
   } else if (!Object.values(run.steps).some(s => active.has(s.status))) run.status = "blocked";
   saveRun(run);
 }

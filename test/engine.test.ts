@@ -287,3 +287,65 @@ test("workspace reuse is only for an ancestor write step, and one worktree has o
   expect(() => setup([{ id: "a", policy: "workspace-write", worktree: true, workspace: "a" }])).toThrow("either worktree");
   expect(setup(loop).workflow.steps.find(s => s.id === "fix-1")!.workspace).toBe("impl");
 });
+
+class RetainedRuntime extends FakeRuntime {
+  continued: string[] = []; failContinue = false;
+  override async exists(r: Run, id: string) { return this.live.has(r.steps[id].session); }
+  override async create(r: Run, s: Step) { this.created.push(s.id); this.live.add(r.steps[s.id].session); r.steps[s.id].cwd = s.cwd; }
+  override async stop(r: Run, id: string) { this.live.delete(r.steps[id].session); }
+  async continue(r: Run, s: Step) { this.continued.push(s.id); if (this.failContinue) throw new Error("continuation outcome unknown"); r.steps[s.id].cwd = s.cwd; }
+}
+const retained = [{ id: "impl", policy: "workspace-write", worktree: true }, { id: "review", agent: "claude", dependsOn: ["impl"] },
+  { id: "fix", policy: "workspace-write", workspace: "impl", reuseSession: "impl", dependsOn: ["review"] }];
+test("round completion retains one TUI; fix has a distinct token and only its own report completes it", async () => {
+  const r = setup(retained), rt = new RetainedRuntime(), tr = new FakeTransport();
+  await tick(r, rt, tr); tr.report(r, "impl", "accepted"); tr.report(r, "impl", "done"); await tick(r, rt, tr);
+  expect(r.steps.impl.lifecycle).toBe("retained"); expect(rt.live.size).toBe(2);
+  tr.report(r, "review", "accepted"); tr.report(r, "review", "done"); await tick(r, rt, tr);
+  expect(rt.created).toEqual(["impl", "review"]); expect(rt.continued).toEqual(["fix"]);
+  expect(r.steps.fix.session).toBe(r.steps.impl.session); expect(r.steps.fix.token).not.toBe(r.steps.impl.token);
+  tr.report(r, "impl", "done"); tr.report(r, "fix", "accepted", "codex-87654321"); tr.report(r, "fix", "done", undefined, r.steps.impl.token);
+  await tick(r, rt, tr); expect(r.steps.fix.status).toBe("starting");
+  tr.report(r, "fix", "accepted"); tr.report(r, "fix", "done"); await tick(r, rt, tr);
+  expect(r.status).toBe("done"); expect(rt.live.size).toBe(0); expect(r.steps.fix.lifecycle).toBe("closed");
+});
+test("uncertain continuation is never resent or adopted merely because its TUI exists", async () => {
+  const r = setup(retained), rt = new RetainedRuntime(), tr = new FakeTransport();
+  await tick(r, rt, tr); tr.report(r, "impl", "accepted"); tr.report(r, "impl", "done"); await tick(r, rt, tr);
+  tr.report(r, "review", "accepted"); tr.report(r, "review", "done"); rt.failContinue = true; await tick(r, rt, tr);
+  expect(r.steps.fix.status).toBe("uncertain"); rt.failContinue = false; r.status = "running"; await tick(r, rt, tr);
+  expect(r.steps.fix.status).toBe("uncertain"); expect(rt.continued).toEqual(["fix"]);
+  tr.report(r, "fix", "accepted"); r.status = "running"; await tick(r, rt, tr); expect(r.steps.fix.status).toBe("running");
+});
+test("retention obeys actual session cap and explains a too-small cap without hanging", async () => {
+  const r = setup(retained, 1), rt = new RetainedRuntime(), tr = new FakeTransport();
+  await tick(r, rt, tr); tr.report(r, "impl", "accepted"); tr.report(r, "impl", "done"); await tick(r, rt, tr);
+  expect(rt.created).toEqual(["impl"]); expect(r.steps.review.status).toBe("blocked"); expect(r.steps.review.error).toContain("higher concurrency");
+});
+test("worker accepts a later round only in its declared chain, after the previous round is done", async () => {
+  const r = setup(retained), rt = new RetainedRuntime(), tr = new FakeTransport(); await tick(r, rt, tr);
+  process.env.SFLOW_RUN_ID = r.id; process.env.SFLOW_STEP_ID = "impl"; process.env.SFLOW_TOKEN = r.steps.impl.token;
+  await workerTask(tr); await workerReport(tr, { status: "done", summary: "initial" }); await tick(r, rt, tr);
+  tr.report(r, "review", "accepted"); tr.report(r, "review", "done"); await tick(r, rt, tr);
+  process.env.SFLOW_STEP_ID = "fix"; process.env.SFLOW_TOKEN = r.steps.fix.token;
+  expect((await workerTask(tr) as { stepId: string }).stepId).toBe("fix");
+  await workerReport(tr, { status: "done", summary: "fixed" }); await tick(r, rt, tr); expect(r.status).toBe("done");
+});
+test("session reuse rejects changed model/policy/workspace, non-ancestors and branching rounds", () => {
+  expect(() => setup([{ id: "a" }, { id: "b", reuseSession: "a" }])).toThrow("ancestor");
+  for (const patch of [{ model: "changed" }, { agent: "claude" }, { policy: "workspace-write", worktree: true }])
+    expect(() => setup([{ id: "a" }, { id: "b", dependsOn: ["a"], reuseSession: "a", ...patch }])).toThrow("same native");
+  expect(() => setup([{ id: "a", agent: "agy" }, { id: "b", agent: "agy", dependsOn: ["a"], reuseSession: "a" }])).toThrow("agy unsupported");
+  expect(() => setup([{ id: "a" }, { id: "b", dependsOn: ["a"], reuseSession: "a" }, { id: "c", dependsOn: ["a"], reuseSession: "a" }])).toThrow("dependency ordered");
+});
+
+test("a missing retained worker is not recreated; cancellation closes retained and active workers", async () => {
+  const r = setup(retained), rt = new RetainedRuntime(), tr = new FakeTransport();
+  await tick(r, rt, tr); tr.report(r, "impl", "accepted"); tr.report(r, "impl", "done"); await tick(r, rt, tr);
+  await rt.stop(r, "impl"); tr.report(r, "review", "accepted"); tr.report(r, "review", "done"); await tick(r, rt, tr);
+  expect(r.steps.fix.status).toBe("uncertain"); expect(rt.continued).toEqual([]); expect(rt.created).toEqual(["impl", "review"]);
+  const r2 = setup(retained), rt2 = new RetainedRuntime(), tr2 = new FakeTransport();
+  await tick(r2, rt2, tr2); tr2.report(r2, "impl", "accepted"); tr2.report(r2, "impl", "done"); await tick(r2, rt2, tr2);
+  writeFileSync(join(r2.dir, "cancel.request"), "cancel"); await tick(r2, rt2, tr2);
+  expect(rt2.live.size).toBe(0); expect(r2.status).toBe("cancelled"); expect(r2.steps.impl.lifecycle).toBe("closed");
+});

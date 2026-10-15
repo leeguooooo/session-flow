@@ -10,7 +10,7 @@ export const PRESETS = {
 } as const;
 export type Preset = keyof typeof PRESETS;
 
-export interface PresetOptions { task: string; cwd: string; write?: boolean; plan?: string; implement?: string; review?: string; agents?: string[]; join?: string; name?: string; rounds?: number }
+export interface PresetOptions { task: string; cwd: string; write?: boolean; inPlace?: boolean; reuseSessions?: boolean; plan?: string; implement?: string; review?: string; agents?: string[]; join?: string; name?: string; rounds?: number }
 
 export const IMPLEMENT = (task: string) => `Task: ${task}
 Implement it in your isolated git worktree (your current working directory). Keep the change as small as the task allows and follow the project's conventions. Run the project's relevant checks. Do not commit, push or merge.
@@ -42,6 +42,8 @@ export function buildPreset(preset: string, o: PresetOptions): Record<string, un
   if (!Number.isInteger(rounds) || rounds < 1 || rounds > 5) throw new Error("--rounds must be 1..5");
   if (writes && !o.write) throw new Error(`${preset} lets an agent write code in a new git worktree of ${cwd} (your checkout stays untouched, nothing is committed). Add --write to confirm`);
   if (!writes && o.write) throw new Error(`${preset} is read-only; --write does not apply`);
+  if (o.inPlace && (!writes || !o.write)) throw new Error("--in-place requires a write preset and --write; it modifies " + cwd + " directly");
+  if (o.reuseSessions && preset !== "implement-review-fix") throw new Error("--reuse-sessions only applies to implement-review-fix");
   const steps: Record<string, unknown>[] = [];
   if (preset === "review") {
     steps.push({ id: "review", agent: agent(o.review, "claude", "--review"), cwd,
@@ -66,6 +68,14 @@ export function buildPreset(preset: string, o: PresetOptions): Record<string, un
       steps.push(...expandReviewFix({ id: "review", agent: reviewer, cwd, dependsOn: ["implement"], prompt: REVIEW(o.task, "implement") },
         { agent: fixer }, "implement", rounds, o.task));
     }
+  }
+  if (o.inPlace) {
+    const implementation = steps.find(s => s.id === "implement")!;
+    delete implementation.worktree; implementation.inPlace = true;
+    implementation.prompt = String(implementation.prompt).replace("isolated git worktree", "existing project checkout") + "\nPreserve pre-existing user edits. Do not reset, stash or clean. Only change files needed for this task.";
+  }
+  if (o.reuseSessions) {
+    for (const s of steps.filter(s => String(s.id).startsWith("fix-"))) s.reuseSession = "implement";
   }
   return { version: 1, name: o.name ?? preset, concurrency: preset === "fan-out" ? Math.min(steps.length - 1, 4) : 2, steps };
 }

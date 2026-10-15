@@ -109,7 +109,7 @@ sflow stats <run-id>
 }
 ```
 
-`model` 可选：不写就用该 CLI 配置的默认模型，也可以写你账号支持的任意模型。相对路径的 `cwd` 以工作流文件所在目录为基准解析。`dependsOn` 构成一张 DAG，互不依赖且已就绪的步骤会并发执行。默认 policy 是 `read-only`；要写文件必须设 `worktree: true`，并且项目得是至少有一个提交的 Git 仓库；或者用 `"workspace": "<步骤>"` 接着在前面某个写步骤的 worktree 里改（那个步骤必须是它的依赖；在同一个 worktree 里写的两个步骤必须有先后依赖）。`"when": {"<依赖>": {"details.verdict": "needs-fix"}}` 表示只有该依赖的结果里这些字段等于给定值时才执行，否则标为 `skipped`（对后续步骤算作已完成）；结果里缺这个字段时步骤会停下，不会猜。`"expect": {"details.verdict": "pass"}` 表示 `done` 报告里没有这些值就改判为 `blocked`。worker 用 `report done '<摘要>' --detail verdict=pass` 写入这类字段。默认执行超时 1800 秒，就绪超时 90 秒（分别对应 `timeoutSeconds` / `readyTimeoutSeconds`）。
+`model` 可选：不写就用该 CLI 配置的默认模型，也可以写你账号支持的任意模型。相对路径的 `cwd` 以工作流文件所在目录为基准解析。`dependsOn` 构成一张 DAG，互不依赖且已就绪的步骤会并发执行。默认 policy 是 `read-only`；写文件默认设 `worktree: true`，也可显式启用下文的 `inPlace: true`，并且项目得是至少有一个提交的 Git 仓库；或者用 `"workspace": "<步骤>"` 接着在前面某个写步骤的 worktree 里改（那个步骤必须是它的依赖；在同一个 worktree 里写的两个步骤必须有先后依赖）。`"when": {"<依赖>": {"details.verdict": "needs-fix"}}` 表示只有该依赖的结果里这些字段等于给定值时才执行，否则标为 `skipped`（对后续步骤算作已完成）；结果里缺这个字段时步骤会停下，不会猜。`"expect": {"details.verdict": "pass"}` 表示 `done` 报告里没有这些值就改判为 `blocked`。worker 用 `report done '<摘要>' --detail verdict=pass` 写入这类字段。默认执行超时 1800 秒，就绪超时 90 秒（分别对应 `timeoutSeconds` / `readyTimeoutSeconds`）。
 
 合成示例 [examples/smoke.json](examples/smoke.json) 覆盖了 Claude 做规划、Claude/Codex 并行干活、最后由 Codex 汇总这条链路，全程不改项目文件。[examples/mixed.json](examples/mixed.json) 用四种 agent 跑同一张图：Pi 规划，agy 和 Claude 并行，Codex 汇总。
 
@@ -130,7 +130,7 @@ Session Flow 把 agy 作为自己管理的交互式 TUI 启动。这和 OCS 可�
 
 worker 通过机器可读的 OCS 事件上报"已接受"和唯一一条最终结果，这些事件不会唤醒对方。worker 之间不会来回发确认或例行进度。依赖推进由驱动器负责，调度不靠模型之间协商。
 
-同一次运行中，只读步骤共用一个协议工作目录和同一套工具；获批的协议命令和能力凭证（capability）仍然按步骤隔离。可选的 `prefixWarmupMs`（默认 0，最大 5000）让 agent/模型相同的一组步骤先等第一个 worker 接受任务，或等到超时，再启动其余的兄弟步骤。先实测它对你的工作负载有没有帮助，再决定开不开。这样做让前缀复用成为可能，但能不能命中缓存，仍取决于原生 CLI 和模型提供方。不同模型不会被分到一组，写步骤也照样各用各的 worktree。共用的 Claude worker 工作区别名有歧义，如果要给它们发消息，必须用精确的会话 ID 寻址。
+同一次运行中，只读步骤共用一个协议工作目录和同一套工具；获批的协议命令和能力凭证（capability）仍然按步骤隔离。可选的 `prefixWarmupMs`（默认 0，最大 5000）让 agent/模型相同的一组步骤先等第一个 worker 接受任务，或等到超时，再启动其余的兄弟步骤。先实测它对你的工作负载有没有帮助，再决定开不开。这样做让前缀复用成为可能，但能不能命中缓存，仍取决于原生 CLI 和模型提供方。不同模型不会被分到一组，写步骤默认各用各的 worktree。共用的 Claude worker 工作区别名有歧义，如果要给它们发消息，必须用精确的会话 ID 寻址。
 
 新的运行会把完整结果存成不可变、按内容寻址的私有文件。OCS 消息和运行快照里只带状态、摘要和 SHA-256 引用。驱动器在接受完成之前会校验文件和哈希。依赖结果小的直接内联，大的走引用，扇入很宽时只用一份清单。评审者必须看过完整结果和产物才能下结论。`status` 只打印摘要；`result` 按需读取一份经过校验的完整报告。
 
@@ -151,7 +151,7 @@ sflow stop <run-id>
 
 resume 会先对账 OCS 报告再继续推进。结果不确定的发送或 worker 创建绝不会自动重试。就绪超时后 worker 可能还停在那儿等人处理；处理完提示，再 resume。最终的 failure/blocked 报告对本次运行是终局。想有意重试，请新开一次运行。
 
-只有明确的 `done` 报告才会推进依赖。报告只是 agent 的自述，所以要去看实际的 diff 和检查结果。已完成的会话会被归档并关闭；`logs` 读取保留下来的归档。worktree 留在磁盘上供你检查、手动提交/合并，运行器不会自动提交或合并。
+只有明确的 `done` 报告才会推进依赖。报告只是 agent 的自述，所以要去看实际的 diff 和检查结果。后续轮次不再需要的已完成会话会被归档并关闭；`logs` 读取保留下来的归档。worktree 留在磁盘上供你检查、手动提交/合并，运行器不会自动提交或合并。
 
 运行记录存放在 `~/.local/state/session-flow/runs/<id>`（可用 `SFLOW_HOME` 覆盖）；每次运行的 OCS 消息走一个 `sflow-<id>` 频道。这些记录可能含有私密的任务文本，别把它们提交进 git。所有 worker 都跑在你的同一个系统账号下；协议防不住同一用户下的恶意进程。
 
@@ -164,3 +164,36 @@ bun run build
 ```
 
 [DESIGN.md](DESIGN.md) 介绍了职责归属、失败语义、协议和 MVP 的限制。运行时适配器可以替换；本版本实现了 tmux 以及 Claude、Codex、Pi 和 agy 的 TUI。
+
+## 原地修改和保留会话
+
+下面的命令直接修改指定项目，并让修复轮次复用实现者的原生会话：
+
+```sh
+sflow init implement-review-fix --task "修复问题" --cwd /path/to/project \
+  --write --in-place --reuse-sessions --rounds 2
+```
+
+`--in-place` 必须和 `--write` 一起使用；计划会打印实际要改的目录。
+目录必须是 Git 工作区根目录。生成的写步骤用 `inPlace: true` 替代
+`worktree: true`，后续 `workspace` 修复步骤继承这个目录。工作流里看这个
+目录的审查步骤和写步骤必须有先后依赖。也可以用
+`sflow start --template dev --write --in-place --task "…"`。
+模板即使已写了 `inPlace`，每次 start 仍要带两个开关；已保存的 JSON
+工作流里的 `inPlace` 则是 run 的明确写入授权。
+
+运行器不会 reset、stash 或 clean 用户目录。`sflow review` 比较步骤前后
+的私有快照，给出新增改动和 patch 路径，不把用户原先的暂存、未暂存或
+未跟踪改动算进去。worker 的任务也带 `workspaceObservation`，审查者可以
+看同一份基线。HEAD/index 改变、只读审查期间文件变化、步骤之间的外部
+改动都会阻止继续。快照不含忽略文件，不支持子模块。写步骤执行期间的
+外部改动无法与 worker 改动区分，摘要会明确提示这个限制。
+
+`--reuse-sessions` 在这个 init 预设中保留实现者的 TUI，供后续修复使用。
+手写工作流和模板用 `reuseSession: "<祖先步骤>"`。祖先必须明确报告 done，
+agent、model、policy 和实际工作目录必须相同，各轮必须有先后依赖。
+支持 Claude、Codex 和 Pi；agy 没有原生会话身份，暂不支持复用。
+每轮仍有独立 token 和结果。投递结果不确定时，即使 TUI 还在也不会重发。
+保留的会话占并发名额；实现者等另一个审查者时，concurrency 至少设为 2。
+status 分别记录步骤状态和会话的 active/retained/closed 生命周期。
+取消或最终完成会关闭本次运行的会话，保留产物。

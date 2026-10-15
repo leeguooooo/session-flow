@@ -34,3 +34,11 @@ test("the review step is told to inspect the actual diff, not the summary", () =
   expect(String(wf.steps[2].prompt)).toContain("git -C <path> diff");
   expect(String(wf.steps[2].prompt)).toContain("Do not rely on the implementer's summary");
 });
+
+test("in-place and session retention are separate explicit options", () => {
+  expect(() => buildPreset("implement-review-fix", { task: "fixture", cwd: ".", inPlace: true })).toThrow("--write");
+  const p = buildPreset("implement-review-fix", { task: "fixture", cwd: ".", write: true, inPlace: true, reuseSessions: true }) as { steps: Record<string, unknown>[] };
+  expect(p.steps.find(s => s.id === "implement")!.inPlace).toBe(true);
+  expect(p.steps.find(s => s.id === "implement")!.worktree).toBeUndefined();
+  expect(p.steps.find(s => s.id === "fix-1")!.reuseSession).toBe("implement");
+});

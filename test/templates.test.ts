@@ -151,3 +151,16 @@ test("no implicit template: explicit selection or a user-set default is required
   setDefault(cwd, "project", "builtin:review");
   expect(prepareStart({ cwd, task: "look" }).origin.template).toBe("review");
 });
+
+test("start requires explicit in-place authorization each time and transforms worktree owners", async () => {
+  const { checked } = await import("../src/process"); const { cwd } = fixture();
+  await checked(["git", "init", "-q", cwd]);
+  const p = prepareStart({ cwd, task: "fixture", template: "builtin:dev", write: true, inPlace: true });
+  expect(p.workflow.steps.find(s => s.id === "implement")!.inPlace).toBe(true);
+  expect(p.workflow.steps.find(s => s.id === "implement")!.worktree).toBeUndefined();
+  const t = { version: 1, kind: "sflow-template", name: "direct", params: {}, roles: { implement: { agent: "codex" } }, steps: [{ id: "write", role: "implement", cwd: ".", prompt: "{{task}}", policy: "workspace-write", inPlace: true }] };
+  const file = join(cwd, "direct.json"); writeJSON(file, t); createTemplate("direct", file, cwd, "project");
+  expect(() => prepareStart({ cwd, template: "direct", task: "fixture", write: true })).toThrow("--in-place");
+  expect(prepareStart({ cwd, template: "direct", task: "fixture", write: true, inPlace: true }).workflow.steps[0].inPlace).toBe(true);
+  expect(() => prepareStart({ cwd, template: "builtin:review", task: "fixture", inPlace: true })).toThrow("write template");
+});

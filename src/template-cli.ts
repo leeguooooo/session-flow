@@ -31,17 +31,17 @@ function assertEmpty(args: string[]) { if (args.length) throw new Error(`unexpec
 function scalar(v: string): import("./types").Scalar { try { const x = JSON.parse(v); if (["string", "number", "boolean"].includes(typeof x)) return x; } catch {} return v; }
 export function startPlan(args: string[], located?: Located): { plan: Plan; dryRun: boolean; json: boolean; progress: string } {
   const list = [...args], cwd = resolve(take(list, "--cwd") ?? "."), task = take(list, "--task") ?? "", template = take(list, "--template");
-  const write = bool(list, "--write"), dryRun = bool(list, "--dry-run"), json = bool(list, "--json"), progress = take(list, "--progress") ?? "text";
+  const write = bool(list, "--write"), inPlace = bool(list, "--in-place"), dryRun = bool(list, "--dry-run"), json = bool(list, "--json"), progress = take(list, "--progress") ?? "text";
   if (!dryRun && json) throw new Error("--json is for start --dry-run (run stdout already uses JSON)");
   if (!["text", "json", "none"].includes(progress)) throw new Error("--progress text|json|none");
   const roleValues = roles(list), cliParams = pairs(list, "--param"), file = take(list, "--params-file");
   let fileParams: Record<string, unknown> = {};
   if (file) { const value = JSON.parse(readFileSync(file, "utf8")); if (!value || Array.isArray(value) || typeof value !== "object") throw new Error("--params-file must contain a parameter object"); fileParams = value; }
   assertEmpty(list);
-  return { plan: prepareStart({ cwd, task, template, write, located, roles: roleValues, params: { ...fileParams, ...cliParams }, paramSources: { ...Object.fromEntries(Object.keys(fileParams).map(k => [k, `CLI --params-file ${resolve(file!)}`])), ...Object.fromEntries(Object.keys(cliParams).map(k => [k, "CLI --param"])) } }), dryRun, json, progress };
+  return { plan: prepareStart({ cwd, task, template, write, inPlace, located, roles: roleValues, params: { ...fileParams, ...cliParams }, paramSources: { ...Object.fromEntries(Object.keys(fileParams).map(k => [k, `CLI --params-file ${resolve(file!)}`])), ...Object.fromEntries(Object.keys(cliParams).map(k => [k, "CLI --param"])) } }), dryRun, json, progress };
 }
 export function describePlan(p: Plan): string[] {
-  return [`template ${p.origin.template} (${p.origin.scope}), from ${p.origin.path}`, `selected by ${p.templateSource}; project ${p.project}; ${p.writes ? "writes in isolated worktrees (--write supplied)" : "read-only"}`,
+  return [`template ${p.origin.template} (${p.origin.scope}), from ${p.origin.path}`, `selected by ${p.templateSource}; project ${p.project}; ${p.workflow.steps.some(s => s.inPlace) ? "writes directly in project checkout (--write --in-place supplied)" : p.writes ? "writes in isolated worktrees (--write supplied)" : "read-only"}`,
     ...Object.entries(p.origin.roles).map(([k, r]) => `  role ${k}: ${r.agent}${r.model ? ` / ${r.model}` : " / native default model"}`),
     ...Object.entries(p.sources).map(([k, v]) => `  ${k} from ${v}`), ...p.warnings.map(w => `warning: ${w}`), ...describe(p.workflow)];
 }
@@ -51,7 +51,7 @@ export function templateCommand(input: string[]) {
     console.log(`sflow template list [--cwd dir] [--json]
 sflow template show <name> [--cwd dir] [--json]
 sflow template create <name> --from <file|name> [--project|--global] [--cwd dir] [--force]
-sflow template validate <name|file> [--cwd dir] [--task text] [--param key=value] [--write] [--json]
+sflow template validate <name|file> [--cwd dir] [--task text] [--param key=value] [--write] [--in-place] [--json]
 sflow template use <name> [--project|--global] [--cwd dir]
 sflow template clear-default [--project|--global] [--cwd dir]
 sflow template remove <name> [--project|--global] [--cwd dir]

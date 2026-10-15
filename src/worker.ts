@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { loadRun } from "./store";
 import { isTask, parseBody } from "./engine";
+import { sessionRoot } from "./config";
 import { eventProof, validProof } from "./protocol";
 import type { Transport, WorkerEvent } from "./types";
 import { resolveResult, storeResult } from "./results";
@@ -19,10 +20,15 @@ export async function workerTask(transport: Transport) {
   const actor = await transport.whoami(step.agent, { runId: run.id, stepId });
   if (state.actor && actor !== state.actor) throw new Error("worker identity changed");
   const rows = await transport.read(run.channel, actor);
+  if (step.reuseSession) {
+    const previous = run.steps[step.reuseSession];
+    if (previous.status !== "done" || !previous.result || previous.actor !== actor) throw new Error("previous round is not done by this retained worker");
+  }
   const claimedElsewhere = rows.some(row => {
     const e = parseBody(row) as WorkerEvent | null;
-    return e?.type === "sflow.worker" && e.runId === run.id && e.stepId !== stepId && e.status === "accepted" &&
-      e.actor === actor && row.from === actor && !!run.steps[e.stepId] && validProof(e, run.steps[e.stepId].token);
+    return e?.type === "sflow.worker" && e.runId === run.id && e.stepId !== stepId && !!run.steps[e.stepId] && e.status === "accepted" &&
+      sessionRoot(run.workflow.steps, run.workflow.steps.find(s => s.id === e.stepId)!) !== sessionRoot(run.workflow.steps, step) &&
+      e.actor === actor && row.from === actor && validProof(e, run.steps[e.stepId].token);
   });
   if (claimedElsewhere) throw new Error("this native session already accepted another step");
   const tasks = rows.filter(r => r.from === `sflow-${run.id}` && isTask(parseBody(r), run, stepId));

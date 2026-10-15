@@ -73,7 +73,7 @@ async function main() {
 
 sflow start --task "…" [--template name] [--cwd dir] [--write] [--in-place] [--dry-run] [--json]
                                      use a reusable template (project/global defaults); --role r=agent,
-                                     --model r=name, --param k=v, --params-file file
+                                     --model r=name, --host step=host[,host…], --param k=v, --params-file file
 sflow template <command>             list/show/create/validate/use/clear-default/remove
 sflow config show|set|clear           inspect or change role/model/parameter defaults
 sflow doctor [workflow.json] [--json] check tmux, ocs, agent CLIs and their sign-in (no model calls)

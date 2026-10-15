@@ -35,10 +35,11 @@ export function startPlan(args: string[], located?: Located): { plan: Plan; dryR
   if (!dryRun && json) throw new Error("--json is for start --dry-run (run stdout already uses JSON)");
   if (!["text", "json", "none"].includes(progress)) throw new Error("--progress text|json|none");
   const roleValues = roles(list), cliParams = pairs(list, "--param"), file = take(list, "--params-file");
+  const hosts = Object.fromEntries(Object.entries(pairs(list, "--host")).map(([k, v]) => [k, v.split(",").map(x => x.trim()).filter(Boolean)]));
   let fileParams: Record<string, unknown> = {};
   if (file) { const value = JSON.parse(readFileSync(file, "utf8")); if (!value || Array.isArray(value) || typeof value !== "object") throw new Error("--params-file must contain a parameter object"); fileParams = value; }
   assertEmpty(list);
-  return { plan: prepareStart({ cwd, task, template, write, inPlace, located, roles: roleValues, params: { ...fileParams, ...cliParams }, paramSources: { ...Object.fromEntries(Object.keys(fileParams).map(k => [k, `CLI --params-file ${resolve(file!)}`])), ...Object.fromEntries(Object.keys(cliParams).map(k => [k, "CLI --param"])) } }), dryRun, json, progress };
+  return { plan: prepareStart({ cwd, task, template, write, inPlace, located, roles: roleValues, hosts, params: { ...fileParams, ...cliParams }, paramSources: { ...Object.fromEntries(Object.keys(fileParams).map(k => [k, `CLI --params-file ${resolve(file!)}`])), ...Object.fromEntries(Object.keys(cliParams).map(k => [k, "CLI --param"])) } }), dryRun, json, progress };
 }
 export function describePlan(p: Plan): string[] {
   return [`template ${p.origin.template} (${p.origin.scope}), from ${p.origin.path}`, `selected by ${p.templateSource}; project ${p.project}; ${p.workflow.steps.some(s => s.inPlace) ? "writes directly in project checkout (--write --in-place supplied)" : p.writes ? "writes in isolated worktrees (--write supplied)" : "read-only"}`,

@@ -134,6 +134,9 @@ has no remote execution, so sflow talks to each host with `ssh <target> <bin>
 remote <op>`, JSON on stdin and stdout. Host key checking, agent forwarding and the
 rest of the SSH configuration stay as the user set them.
 
+Templates may carry `host` and command steps (no role); `sflow start --host
+<step>=<hosts>` overrides one step's host for a run and is recorded as its source.
+
 Hosts live in `<config home>/hosts.json`: name → `{ssh, bin, slots, maxLoad,
 minFreeGB, site, tags}`. A run freezes the entries its steps name at creation
 (record version 4); resume uses the frozen copy, never the current file. Every

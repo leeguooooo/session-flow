@@ -216,6 +216,7 @@ artifacts, no agent involved.
 - The hosts a workflow names are copied into the run when it starts, so editing
   `hosts.json` does not change a running or resumed run.
 - Workflow `concurrency` caps agent sessions and running command steps together.
+- Templates can carry `host` and command steps too; `sflow start --host <step>=<host>[,<host>…]` overrides one step's host for a run.
 - `sflow hosts gc [--days 7]` deletes finished command jobs on the hosts.
 
 GUI work, screenshots, signing with your keychain, or anything using this

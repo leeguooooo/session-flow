@@ -86,8 +86,9 @@ function stale(owner: string): boolean {
   // before any start proves nothing runs.
   return existsSync(join(dir, "cancel.json"));
 }
-function claimLocked(owner: string, slots: number): boolean {
-  if (slotOwners().some(s => s.owner === owner)) return true;
+// "held": this owner already had a slot (a retained session); "new": claimed now; false: none free.
+function claimLocked(owner: string, slots: number): "held" | "new" | false {
+  if (slotOwners().some(s => s.owner === owner)) return "held";
   for (let i = 0; i < slots; i++) {
     const path = join(slotsDir(), String(i));
     if (existsSync(path)) {
@@ -96,7 +97,7 @@ function claimLocked(owner: string, slots: number): boolean {
     }
     mkdirSync(path, { mode: 0o700 });
     writeFileSync(join(path, "owner.json"), JSON.stringify({ owner, since: Date.now() }), { mode: 0o600 });
-    return true;
+    return "new";
   }
   return false;
 }
@@ -294,8 +295,8 @@ async function prepareMirror(input: any) {
   const step = run.workflow.steps.find(s => s.id === stepId);
   if (!step) throw new Error("step missing from mirror");
   const root = sessionRoot(run.workflow.steps, step), owner = `step:${run.id}:${root}`;
-  const held = await withLock(() => slotOwners().some(x => x.owner === owner));
-  if (!await claimSlot(owner, Number(input.slots))) return { state: "busy" };
+  const claim = await claimSlot(owner, Number(input.slots));
+  if (!claim) return { state: "busy" };
   // Checkouts the step reads or writes, then remote paths for every driver path they replace.
   const pathMap: Record<string, string> = {};
   try {
@@ -303,11 +304,14 @@ async function prepareMirror(input: any) {
       if (c.sub !== undefined && c.sub !== "." && !safeRelative(c.sub)) throw new Error("invalid checkout subdirectory");
       pathMap[c.local] = join(await checkout(run.id, c), c.sub ?? ".");
     }
+    return await publishMirror(run, stepId, step, dir, socketDir, pathMap, input);
   } catch (e) {
     // A slot this call claimed goes back; one a retained session already held stays with it.
-    if (!held) await releaseSlot(owner);
+    if (claim === "new") await releaseSlot(owner);
     throw e;
   }
+}
+function publishMirror(run: Run, stepId: string, step: Step, dir: string, socketDir: string, pathMap: Record<string, string>, input: any) {
   return withLock(() => {
     const existing = existsSync(join(dir, "run.json")) ? mirrorRun(run.id) : undefined;
     const mirror: Run = { ...existing, ...run, dir, socket: join(socketDir, "tmux.sock"), mirror: { driver: String(input.driver ?? "") },
@@ -471,6 +475,9 @@ export async function gc(input: any) {
           if (!absent(list)) return;
         }
       } catch { return; } // Invalid records and inconclusive probes are kept.
+      // A slot claimed in the last hour means a driver is placing or starting a step there (prepare
+      // finishes before the session exists); even --days 0 waits for that.
+      if (slotOwners().some(x => x.owner.startsWith(`step:${id}:`) && Date.now() - Number(x.since ?? 0) < 3600_000)) return;
       for (const s of slotOwners()) if (s.owner.startsWith(`step:${id}:`)) releaseLocked(s.owner);
       // Under the lock only renames: the run and its checkouts leave their names at once, so a later
       // prepare starts a fresh mirror. The slow deletion happens after the lock is released.

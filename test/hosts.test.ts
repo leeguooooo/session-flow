@@ -121,7 +121,7 @@ test("a failing command is failed with its exit code; it is never re-run", async
 test("slots are claimed on the host; a full host makes the step wait, not run elsewhere", async () => {
   const mini = host("mini", { slots: 1 });
   const run = setup([
-    { id: "a", agent: "command", host: "mini", command: ["sh", "-c", "sleep 1"] },
+    { id: "a", agent: "command", host: "mini", command: ["sh", "-c", "sleep 4"] },
     { id: "b", agent: "command", host: "mini", command: ["true"] },
   ], { mini });
   const rt = router(), tr = new NoTransport();
@@ -333,9 +333,16 @@ test("gc removes old mirrors and their worktrees and releases only their slots",
   const file = join(dir, "run.json"), old = new Date(Date.now() - 8 * 86400_000);
   gcRun(id);
   utimesSync(file, old, old);
-  expect(await claimSlot(`step:${id}:a`, 3)).toBe(true);
-  expect(await claimSlot(`step:${id}:b`, 3)).toBe(true);
-  expect(await claimSlot("step:other:a", 3)).toBe(true);
+  expect(await claimSlot(`step:${id}:a`, 3)).toBe("new");
+  expect(await claimSlot(`step:${id}:b`, 3)).toBe("new");
+  expect(await claimSlot("step:other:a", 3)).toBe("new");
+  // Claimed a minute ago: a driver may still be starting the step, so even an old mirror stays.
+  expect(await gc({ days: 7 })).toEqual({ removed: [], mirrors: [] });
+  expect(existsSync(dir)).toBe(true);
+  for (const n of readdirSync(join(home, "slots"))) {
+    const f = join(home, "slots", n, "owner.json"), o = JSON.parse(readFileSync(f, "utf8"));
+    writeFileSync(f, JSON.stringify({ ...o, since: Date.now() - 2 * 3600_000 }));
+  }
   expect(await gc({ days: 7 })).toEqual({ removed: [], mirrors: [id] });
   expect(existsSync(dir)).toBe(false);
   expect(existsSync(join(home, "checkouts", id))).toBe(false);
@@ -354,7 +361,7 @@ test("gc keeps fresh mirrors and old runs driven on this host", async () => {
     const file = join(dir, "run.json");
     gcRun(id, id === fresh);
     if (id === local) { const old = new Date(Date.now() - 8 * 86400_000); utimesSync(file, old, old); }
-    expect(await claimSlot(`step:${id}:a`, 2)).toBe(true);
+    expect(await claimSlot(`step:${id}:a`, 2)).toBe("new");
   }
   expect(await gc({ days: 7 })).toEqual({ removed: [], mirrors: [] });
   for (const id of [fresh, local]) expect(existsSync(join(process.env.SFLOW_HOME, "runs", id))).toBe(true);
@@ -366,7 +373,7 @@ test("gc keeps an old mirror with a real live tmux worker", async () => {
   const run = gcRun("00000000-0000-0000-0000-000000000004");
   const file = join(run.dir, "run.json"), old = new Date(Date.now() - 8 * 86400_000);
   utimesSync(file, old, old);
-  expect(await claimSlot(`step:${run.id}:a`, 1)).toBe(true);
+  expect(await claimSlot(`step:${run.id}:a`, 1)).toBe("new");
   try {
     const started = spawnSync("tmux", ["-S", run.socket, "new-session", "-d", "-s", "x", "sleep", "30"], { encoding: "utf8" });
     expect(started.status).toBe(0);
@@ -382,7 +389,7 @@ test("gc keeps corrupt but parseable mirror records", async () => {
   const file = join(run.dir, "run.json"), old = new Date(Date.now() - 8 * 86400_000);
   writeFileSync(file, JSON.stringify({ ...run, socket: join(run.dir, "missing.sock") }));
   utimesSync(file, old, old);
-  expect(await claimSlot(`step:${run.id}:a`, 1)).toBe(true);
+  expect(await claimSlot(`step:${run.id}:a`, 1)).toBe("new");
   expect(await gc({ days: 7 })).toEqual({ removed: [], mirrors: [] });
   expect(existsSync(file)).toBe(true);
   expect(readdirSync(join(process.env.SFLOW_HOME, "slots"))).toHaveLength(1);
@@ -399,7 +406,7 @@ test("gc keeps a mirror while checkout preparation is in progress", async () => 
   const run = gcRun("00000000-0000-0000-0000-000000000006");
   mkdirSync(join(run.dir, "preparing"));
   writeFileSync(join(run.dir, "preparing", "synthetic-operation"), "");
-  expect(await claimSlot(`step:${run.id}:a`, 1)).toBe(true);
+  expect(await claimSlot(`step:${run.id}:a`, 1)).toBe("new");
   expect(await gc({ days: 0 })).toEqual({ removed: [], mirrors: [] });
   expect(existsSync(join(run.dir, "run.json"))).toBe(true);
   expect(readdirSync(join(process.env.SFLOW_HOME, "slots"))).toHaveLength(1);
@@ -412,13 +419,13 @@ test("a slot whose runner died but whose command group lives is not reclaimed", 
   const sleeper = Bun.spawn(["sh", "-c", "sleep 20"], { stdio: ["ignore", "ignore", "ignore"], detached: true } as any);
   writeFileSync(join(dir, "runner.json"), JSON.stringify({ pid: 999_999 }));
   writeFileSync(join(dir, "started.json"), JSON.stringify({ pid: sleeper.pid, pgid: sleeper.pid }));
-  expect(await claimSlot(`job:${id}`, 1)).toBe(true);
+  expect(await claimSlot(`job:${id}`, 1)).toBe("new");
   try {
     expect(await claimSlot("job:other", 1)).toBe(false);
     expect((jobStatus({ jobId: id }) as any).state).toBe("running");
   } finally { process.kill(-sleeper.pid!, "SIGKILL"); }
   await Bun.sleep(100);
-  expect(await claimSlot("job:other", 1)).toBe(true);
+  expect(await claimSlot("job:other", 1)).toBe("new");
 }, 30_000);
 
 test("concurrent claimers on one host never share a slot", async () => {
@@ -427,7 +434,7 @@ test("concurrent claimers on one host never share a slot", async () => {
   writeFileSync(script, `import { claimSlot } from ${JSON.stringify(resolve(import.meta.dir, "../src/remote.ts"))};\nconsole.log(await claimSlot(process.argv[2], 1));\n`);
   const procs = Array.from({ length: 8 }, (_, i) => Bun.spawn([process.execPath, script, `step:r:${i}`], { env: { ...process.env, SFLOW_HOME: home }, stdout: "pipe" }));
   const outs = await Promise.all(procs.map(p => new Response(p.stdout).text()));
-  expect(outs.filter(o => o.trim() === "true").length).toBe(1);
+  expect(outs.filter(o => o.trim() === "new").length).toBe(1);
 }, 30_000);
 
 test("a cancel recorded before the start keeps the command from ever running", async () => {

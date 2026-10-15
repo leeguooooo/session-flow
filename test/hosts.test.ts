@@ -340,6 +340,8 @@ test("gc removes old mirrors and their worktrees and releases only their slots",
   expect(existsSync(dir)).toBe(false);
   expect(existsSync(join(home, "checkouts", id))).toBe(false);
   expect(git(bare, "worktree", "list", "--porcelain")).not.toContain(realCheckout);
+  // Moved aside under the lock, deleted after it; nothing is left behind.
+  expect(readdirSync(join(home, "trash"))).toEqual([]);
   const owners = readdirSync(join(home, "slots")).map(n => JSON.parse(readFileSync(join(home, "slots", n, "owner.json"), "utf8")).owner);
   expect(owners).toEqual(["step:other:a"]);
 });
@@ -389,6 +391,7 @@ test("gc keeps corrupt but parseable mirror records", async () => {
 test("hosts gc summary includes job and mirror counts", () => {
   expect(gcSummary("mini", { removed: ["job1", "job2"], mirrors: ["mirror1"] }))
     .toBe("mini: removed 2 job(s), 1 mirror run(s)");
+  expect(gcSummary("old", { removed: [] })).toBe("old: removed 0 job(s), mirror runs not collected (older sflow there)");
 });
 
 test("gc keeps a mirror while checkout preparation is in progress", async () => {

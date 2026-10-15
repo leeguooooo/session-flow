@@ -382,6 +382,18 @@ export async function cleanup(input: any) {
   await removeCheckouts(run.id);
   return { ok: true };
 }
+// Removed checkouts are gone from disk; pruning drops their registration from each bare repository.
+async function emptyTrash(trash: string) {
+  const repos = new Set<string>();
+  const checkouts = join(trash, "checkouts");
+  for (const name of existsSync(checkouts) ? readdirSync(checkouts) : []) {
+    let gitfile: RegExpMatchArray | null = null;
+    try { gitfile = readFileSync(join(checkouts, name, ".git"), "utf8").match(/^gitdir: (.+)\/worktrees\/[^/]+\s*$/m); } catch {}
+    if (gitfile) repos.add(gitfile[1]);
+  }
+  rmSync(trash, { recursive: true, force: true });
+  for (const repo of repos) await command(["git", "-C", repo, "worktree", "prune"], { timeoutMs: 300_000 }).catch(() => {});
+}
 async function removeCheckouts(runId: string) {
   const dir = checkoutsDir(runId);
   if (existsSync(dir)) for (const name of readdirSync(dir)) {
@@ -406,7 +418,7 @@ export async function attach(runId: string, stepId: string, cli: string[]) {
 export async function gc(input: any) {
   const days = Number(input?.days ?? 7);
   if (!Number.isFinite(days) || days < 0) throw new Error("invalid days");
-  const root = join(dataHome(), "jobs"), removed: string[] = [], mirrors: string[] = [];
+  const root = join(dataHome(), "jobs"), removed: string[] = [], mirrors: string[] = [], doomed: string[] = [];
   for (const id of existsSync(root) ? readdirSync(root) : []) {
     if (!JOB.test(id)) continue;
     const dir = join(root, id), exit = readJSON(join(dir, "exit.json"));
@@ -447,11 +459,17 @@ export async function gc(input: any) {
         }
       } catch { return; } // Invalid records and inconclusive probes are kept.
       for (const s of slotOwners()) if (s.owner.startsWith(`step:${id}:`)) releaseLocked(s.owner);
-      await removeCheckouts(id);
-      rmSync(dir, { recursive: true, force: true });
+      // Under the lock only renames: the run and its checkouts leave their names at once, so a later
+      // prepare starts a fresh mirror. The slow deletion happens after the lock is released.
+      const trash = join(dataHome(), "trash", `${id}-${randomUUID()}`);
+      mkdirSync(trash, { recursive: true, mode: 0o700 });
+      renameSync(dir, join(trash, "run"));
+      if (existsSync(checkoutsDir(id))) renameSync(checkoutsDir(id), join(trash, "checkouts"));
+      doomed.push(trash);
       mirrors.push(id);
     });
   }
+  for (const trash of doomed) await emptyTrash(trash);
   return { removed, mirrors };
 }
 export async function serve(op: string, version: string, cli: string[]): Promise<void> {

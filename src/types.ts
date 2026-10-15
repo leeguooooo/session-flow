@@ -111,6 +111,8 @@ export interface TaskEvent {
   dependencyManifest?: { path: string; sha256: string; count: number };
   // On another host: driver paths named in dependencies and where their copies are here.
   pathMap?: Record<string, string>;
+  // Dependency files too large to copy to that host; read them on the driver machine.
+  evidenceNotCopied?: string[];
 }
 export interface WorkerEvent {
   type: "sflow.worker";

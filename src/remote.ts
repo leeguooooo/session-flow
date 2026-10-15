@@ -293,13 +293,20 @@ async function prepareMirror(input: any) {
   mkdirSync(socketDir, { recursive: true, mode: 0o700 });
   const step = run.workflow.steps.find(s => s.id === stepId);
   if (!step) throw new Error("step missing from mirror");
-  const root = sessionRoot(run.workflow.steps, step);
-  if (!await claimSlot(`step:${run.id}:${root}`, Number(input.slots))) return { state: "busy" };
+  const root = sessionRoot(run.workflow.steps, step), owner = `step:${run.id}:${root}`;
+  const held = await withLock(() => slotOwners().some(x => x.owner === owner));
+  if (!await claimSlot(owner, Number(input.slots))) return { state: "busy" };
   // Checkouts the step reads or writes, then remote paths for every driver path they replace.
   const pathMap: Record<string, string> = {};
-  for (const c of (input.checkouts ?? []) as (Checkout & { local: string; sub?: string })[]) {
-    if (c.sub !== undefined && c.sub !== "." && !safeRelative(c.sub)) throw new Error("invalid checkout subdirectory");
-    pathMap[c.local] = join(await checkout(run.id, c), c.sub ?? ".");
+  try {
+    for (const c of (input.checkouts ?? []) as (Checkout & { local: string; sub?: string })[]) {
+      if (c.sub !== undefined && c.sub !== "." && !safeRelative(c.sub)) throw new Error("invalid checkout subdirectory");
+      pathMap[c.local] = join(await checkout(run.id, c), c.sub ?? ".");
+    }
+  } catch (e) {
+    // A slot this call claimed goes back; one a retained session already held stays with it.
+    if (!held) await releaseSlot(owner);
+    throw e;
   }
   return withLock(() => {
     const existing = existsSync(join(dir, "run.json")) ? mirrorRun(run.id) : undefined;
@@ -324,10 +331,14 @@ export function put(input: any) {
   const run = mirrorRun(input?.runId), out: Record<string, string> = {};
   const inbound = join(run.dir, "inbound"); mkdirSync(inbound, { recursive: true, mode: 0o700 });
   for (const f of input.files ?? []) {
-    if (typeof f.name !== "string" || !/^[\w.-]{1,120}$/.test(f.name)) throw new Error("invalid file name");
+    // rel: evidence of a dependency, kept at its run-relative path so pathMap finds it here.
+    if (f.rel !== undefined ? typeof f.rel !== "string" || !safeRelative(f.rel) || !/^[a-z][a-z0-9-]{0,39}\//.test(f.rel)
+      : typeof f.name !== "string" || !/^[\w.-]{1,120}$/.test(f.name)) throw new Error("invalid file name");
     const body = Buffer.from(String(f.base64), "base64");
-    if (createHash("sha256").update(body).digest("hex") !== f.sha256) throw new Error(`${f.name}: hash mismatch on arrival`);
-    writeFileSync(join(inbound, f.name), body, { mode: 0o600 }); out[f.name] = join(inbound, f.name);
+    if (createHash("sha256").update(body).digest("hex") !== f.sha256) throw new Error(`${f.rel ?? f.name}: hash mismatch on arrival`);
+    const dest = f.rel !== undefined ? join(run.dir, f.rel) : join(inbound, f.name);
+    mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
+    writeFileSync(dest, body, { mode: 0o600 }); out[f.rel ?? f.name] = dest;
   }
   return { paths: out };
 }
@@ -452,9 +463,11 @@ export async function gc(input: any) {
         if (socketExists) {
           const absent = (r: Awaited<ReturnType<typeof command>>) => r.code === 1 && !r.stdout.trim()
             && /no server running|no sessions|error connecting to .*\((No such file or directory|Connection refused)\)/.test(r.stderr);
-          const has = await command(["tmux", "-S", run.socket, "has-session"]);
+          // Under the lock on purpose (a worker could start between an unlocked probe and the delete);
+          // bounded, and a probe that times out keeps the run.
+          const has = await command(["tmux", "-S", run.socket, "has-session"], { timeoutMs: 3000 });
           if (!absent(has)) return;
-          const list = await command(["tmux", "-S", run.socket, "list-sessions"]);
+          const list = await command(["tmux", "-S", run.socket, "list-sessions"], { timeoutMs: 3000 });
           if (!absent(list)) return;
         }
       } catch { return; } // Invalid records and inconclusive probes are kept.

@@ -8,7 +8,7 @@ import { createRun, saveRun } from "../src/store";
 import { tick, reconcile } from "../src/engine";
 import { HostRouter } from "../src/hostrun";
 import { TmuxRuntime } from "../src/runtime";
-import { SshLink, parseHost, candidates, unfit } from "../src/hosts";
+import { SshLink, parseHost, candidates, unfit, REMOTE_PROTOCOL } from "../src/hosts";
 import { freezeHosts, gcSummary } from "../src/hosts-cli";
 import { resolveResult } from "../src/results";
 import { eventProof } from "../src/protocol";
@@ -213,7 +213,7 @@ test("workflow rules for hosts and command steps", () => {
   expect(() => parseHost("x", { ssh: "-oProxyCommand=evil" })).toThrow("ssh must be");
   expect(() => candidates(["any"], {})).toThrow("at least one host");
   const h = parseHost("x", { ssh: "a@b", maxLoad: 0.5, minFreeGB: 10 });
-  const hello = { protocol: 1, version: "x", home: "/", arch: "arm64", platform: "darwin", cpus: 10, load: 4, freeGB: 3.7, tools: {}, slots: [] };
+  const hello = { protocol: REMOTE_PROTOCOL, version: "x", home: "/", arch: "arm64", platform: "darwin", cpus: 10, load: 4, freeGB: 3.7, tools: {}, slots: [] };
   expect(unfit("x", h, hello)).toContain("3.7 GB free");
   expect(unfit("x", h, { ...hello, load: 8, freeGB: 50 })).toContain("busy");
   expect(unfit("x", h, { ...hello, protocol: 99 })).toContain("protocol");
@@ -581,4 +581,38 @@ test("the host lock is mutual exclusion across processes and dies with its holde
   const procs = Array.from({ length: 8 }, () => Bun.spawn([process.execPath, worker], { env: { ...process.env, SFLOW_HOME: home } }));
   expect((await Promise.all(procs.map(p => p.exited))).every(c => c === 0)).toBe(true);
   expect(readFileSync(log, "utf8")).toBe("in\nout\n".repeat(8));
+}, 60_000);
+
+test("a remote step gets copies of the logs and artifacts its dependencies' results name", async () => {
+  const run = setup([
+    { id: "c", agent: "command", command: ["sh", "-c", "echo evidence; mkdir -p o && echo art > o/a.txt"], artifacts: ["o"] },
+    { id: "r", agent: "codex", prompt: "review", host: "mini", dependsOn: ["c"] },
+  ], { mini: host("mini") });
+  const rt = router();
+  const c = run.workflow.steps[0], r = run.workflow.steps[1];
+  run.steps.c.status = "launching"; run.steps.c.startedAt = Date.now();
+  expect(await rt.startCommand(run, c)).toEqual({ ok: true });
+  for (let i = 0; i < 200 && (run.steps.c.status as string) === "running"; i++) { await rt.pollCommand(run, c); await Bun.sleep(50); }
+  expect(run.steps.c.status as string).toBe("done");
+  expect(await rt.placeAgent(run, r)).toEqual({ ok: true });
+  const { buildTask } = await import("../src/context");
+  const task = await rt.remoteTask(run, r, buildTask(run, r));
+  const map = (p: string) => { for (const [k, v] of Object.entries(task.pathMap!)) if (p.startsWith(k + "/")) return v + p.slice(k.length); return p; };
+  const full = resolveResult(run, "c", run.steps.c.result!) as any;
+  expect(full.artifacts.length).toBe(2);
+  for (const a of full.artifacts as string[]) {
+    expect(map(a)).not.toBe(a);
+    expect(readFileSync(map(a))).toEqual(readFileSync(a));
+  }
+}, 60_000);
+
+test("a prepare that fails after claiming a new slot gives the slot back", async () => {
+  const run = setup([{ id: "r", agent: "codex", prompt: "x", host: "mini" }], { mini: host("mini") });
+  const link = new SshLink("mini", run.hosts!.mini);
+  const mirror = { version: run.version, id: run.id, channel: run.channel, createdAt: run.createdAt, status: "running", workflow: run.workflow,
+    steps: { r: { status: "starting", token: run.steps.r.token, session: run.steps.r.session } } };
+  await expect(link.call("prepare", { run: mirror, stepId: "r", slots: 1, driver: "t",
+    checkouts: [{ repo: "0123456789abcdef", commit: "a".repeat(40), tree: "b".repeat(40), name: "r", local: project }] })).rejects.toThrow();
+  const slots = join(base, "host-mini", "state", "slots");
+  expect(existsSync(slots) ? readdirSync(slots) : []).toEqual([]);
 }, 60_000);

@@ -7,7 +7,7 @@ import { saveRun } from "./store";
 import { sessionRoot, workspaceRoot } from "./config";
 import { candidates, LocalLink, SshLink, unfit, type Hello, type Link } from "./hosts";
 import { freeze, push, type Frozen } from "./gitsync";
-import { resultFile, storeResult } from "./results";
+import { resolveResult, resultFile, storeResult } from "./results";
 import { field, parseBody } from "./engine";
 import { safeRelative } from "./remote";
 import type { Menu } from "./prompt";
@@ -167,8 +167,25 @@ export class HostRouter implements SessionRuntime {
       for (const v of Object.values(manifest!)) if (typeof v?.resultFile === "string") upload(v.resultFile);
     }
     const { paths } = files.length ? await link.call<{ paths: Record<string, string> }>("put", { runId: run.id, files: files.map(({ local: _, ...f }) => f) }) : { paths: {} };
+    // Logs and artifacts a dependency's result names inside this run go along at the same relative
+    // path, so the run-directory entry in pathMap leads to real files there.
+    const evidence: { rel: string; base64: string; sha256: string }[] = [], skipped: string[] = [];
+    for (const id of step.dependsOn) {
+      if (run.steps[id].status === "skipped" || !run.steps[id].result) continue;
+      let full: Record<string, unknown>;
+      try { full = resolveResult(run, id, run.steps[id].result!); } catch { continue; }
+      for (const a of Array.isArray(full.artifacts) ? full.artifacts : []) {
+        if (typeof a !== "string" || !a.startsWith(join(run.dir, id) + "/")) continue;
+        let st; try { st = lstatSync(a); } catch { continue; }
+        if (!st.isFile()) continue;
+        if (st.size > 32 * 1024 * 1024) { skipped.push(a); continue; }
+        const body = readFileSync(a);
+        evidence.push({ rel: relative(run.dir, a), base64: body.toString("base64"), sha256: createHash("sha256").update(body).digest("hex") });
+      }
+    }
+    for (let i = 0; i < evidence.length; i += 8) await link.call("put", { runId: run.id, files: evidence.slice(i, i + 8) }, 300_000);
     const moved = (p: string) => paths[p.split("/").pop()!] ?? p;
-    const out: TaskEvent = { ...task, workspace, pathMap: s.remote?.pathMap };
+    const out: TaskEvent = { ...task, workspace, pathMap: s.remote?.pathMap, ...(skipped.length ? { evidenceNotCopied: skipped } : {}) };
     delete out.workspaceObservation;
     out.dependencies = Object.fromEntries(Object.entries(task.dependencies).map(([k, v]) => [k, typeof v.resultFile === "string" ? { ...v, resultFile: moved(v.resultFile) } : v]));
     if (manifest) {

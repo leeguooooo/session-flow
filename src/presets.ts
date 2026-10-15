@@ -67,7 +67,8 @@ export function buildPreset(preset: string, o: PresetOptions): Record<string, un
       prompt: `Task: ${o.task}\nRead the relevant code and propose the smallest change that does it: files to touch, approach, and acceptance criteria someone can check. Do not edit files. Report done with the plan and --detail acceptance='<explicit acceptance criteria>'.` });
     steps.push({ id: "implement", agent: agent(o.implement, "codex", "--implement"), cwd, policy: "workspace-write", worktree: true,
       ...(steps.length ? { dependsOn: ["plan"] } : {}), prompt: IMPLEMENT(o.task) + (steps.length ? "\nFollow the plan in the plan dependency result." : "") });
-    const gate: TestGate | undefined = o.test ? { command: ["sh", "-c", o.test] } : undefined;
+    // pipefail where the shell has it: "bun test | tail" must not report the tail's success.
+    const gate: TestGate | undefined = o.test ? { command: ["sh", "-c", `set -o pipefail 2>/dev/null; ${o.test}`] } : undefined;
     if (preset !== "implement-review-fix") {
       if (gate) steps.push(testStep("test", gate, cwd, "implement", "implement"));
       steps.push({ id: "review", agent: agent(o.review, "claude", "--review"), cwd,

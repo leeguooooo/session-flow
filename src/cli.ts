@@ -129,14 +129,17 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
   if (cmd === "init") {
     const list = args.slice(2);
     if (!arg || arg.startsWith("--")) {
-      console.log(`sflow init <preset> --task "<what to do>" [--cwd <project>] [options]\n\npresets:\n${Object.entries(PRESETS).map(([k, v]) => `  ${k.padEnd(22)} ${v}`).join("\n")}\n\noptions: --in-place (with --write, edits --cwd directly), --reuse-sessions (fix rounds), --write (required for presets that change code), --plan/--implement/--review/--join <agent>, --agents a,b, --rounds n (implement-review-fix, default 2), --name <name>, --out <file>, --print, --force`);
+      console.log(`sflow init <preset> --task "<what to do>" [--cwd <project>] [options]\n\npresets:\n${Object.entries(PRESETS).map(([k, v]) => `  ${k.padEnd(22)} ${v}`).join("\n")}\n\noptions: --in-place (with --write, edits --cwd directly), --reuse-sessions (fix rounds), --write (required for presets that change code), --plan/--implement/--review/--join <agent>, --agents a,b, --rounds n (implement-review-fix, default 2), --test "<command>" (run on the worktree after each write round; reviews read it), --host role=host[,host…] (role: plan, implement, review, test; repeatable), --name <name>, --out <file>, --print, --force`);
       return;
     }
     const flag = (name: string) => takeFlag(list, name);
     const bool = (name: string) => { const i = list.indexOf(name); if (i < 0) return false; list.splice(i, 1); return true; };
     const write = bool("--write"), inPlace = bool("--in-place"), reuseSessions = bool("--reuse-sessions"), printOnly = bool("--print"), force = bool("--force");
     const opts = { task: flag("--task") ?? "", cwd: flag("--cwd") ?? ".", write, inPlace, reuseSessions, plan: flag("--plan"), implement: flag("--implement"), review: flag("--review"),
-      join: flag("--join"), agents: flag("--agents")?.split(",").map(a => a.trim()).filter(Boolean), name: flag("--name"),
+      join: flag("--join"), agents: flag("--agents")?.split(",").map(a => a.trim()).filter(Boolean), name: flag("--name"), test: flag("--test"),
+      hosts: (() => { const h: Record<string, string[]> = {}; for (let v = flag("--host"); v; v = flag("--host")) {
+        const i = v.indexOf("="); if (i < 1) throw new Error("--host role=host[,host…] (role: plan, implement, review, test)");
+        h[v.slice(0, i)] = v.slice(i + 1).split(",").map(x => x.trim()).filter(Boolean); } return h; })(),
       ...(() => { const r = flag("--rounds"); return r === undefined ? {} : { rounds: /^\d+$/.test(r) ? Number(r) : NaN }; })() };
     const out = resolve(flag("--out") ?? `.sflow/${opts.name ?? arg}.json`);
     if (list.length) throw new Error(`unexpected arguments: ${list.join(" ")}`);

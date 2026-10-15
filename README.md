@@ -160,7 +160,7 @@ records instead of misreading referenced results.
 
 New native sessions can prompt for directory trust, login, or tool approval. sflow never answers one itself. You answer in the `sflow run` terminal by typing the option number, or the agent driving the run asks you in its conversation and passes your choice with `sflow answer <run-id> <step-id> <prompt-id> <n>` (the prompt id comes from `sflow status`); either way the answer is sent only if the screen still shows the exact prompt you saw. `sflow attach` still works. While a prompt is on screen the readiness timeout waits (up to the step timeout) and restarts once it is answered; if the driver already stopped, `sflow resume` gives a still-open worker a fresh readiness window. When a worker does not accept in time, the error quotes what its screen shows (a backend or sign-in error, for example) or says the cause is unknown; it only mentions a prompt when one is on screen.
 
-Read-only Claude steps start in one empty folder sflow owns, `~/.local/state/session-flow/workspaces/claude`, so Claude asks to trust it once per machine instead of once per run. That trust covers only this folder, which holds no project code; run files are passed by absolute path. Write steps start in a new worktree, so Claude or Codex asks about that folder (Codex applies the trust to the repository root). Standard approvals remain enabled; this version does not promise unattended execution. For Claude, read-only forbids file-edit tools but shell actions still use native permission gates. Pi read-only steps cannot edit or write files through Pi's tools but can still run shell commands. agy asks before every command; approve its wrapper with "always allow in this conversation" to avoid a second prompt for the report. Codex review workers can write protocol/results and OCS messages, while the reviewed repository stays outside their sandbox write roots.
+Read-only Claude steps start in one empty folder sflow owns, `~/.local/state/session-flow/workspaces/claude`, so Claude asks to trust it once per machine instead of once per run. That trust covers only this folder, which holds no project code; run files are passed by absolute path. Write steps start in a new worktree, so Claude or Codex asks about that folder (Codex applies the trust to the repository root). Each worker gets a private `TMPDIR` it may write, so tests that create temp files run without an approval; a tool writing its own cache outside the run (such as `bun install`) still asks once. Standard approvals remain enabled; this version does not promise unattended execution. For Claude, read-only forbids file-edit tools but shell actions still use native permission gates. Pi read-only steps cannot edit or write files through Pi's tools but can still run shell commands. agy asks before every command; approve its wrapper with "always allow in this conversation" to avoid a second prompt for the report. Codex review workers can write protocol/results and OCS messages, while the reviewed repository stays outside their sandbox write roots.
 
 Ctrl-C stops the driver and leaves workers available. Keep the printed run ID:
 
@@ -216,6 +216,14 @@ artifacts, no agent involved.
 - The hosts a workflow names are copied into the run when it starts, so editing
   `hosts.json` does not change a running or resumed run.
 - Workflow `concurrency` caps agent sessions and running command steps together.
+- A write step on a host works in a fixed directory per project and slot, so codex
+  or claude asks to trust it once per slot (two by default), not once per run.
+  Each new step starts it fresh from HEAD; changes another run left there are
+  saved as a `.leftover-….patch` beside it first.
+- One-line test gates: `sflow init implement-review-fix --task "…" --write --test "bun test"
+  --host implement=box --host review=mini --host test=mini` runs the tests after
+  the implementation and after every fix round, and each review reads them. A
+  failing test is passed to the review (`allowFailure`), which asks for a fix.
 - Templates can carry `host` and command steps too; `sflow start --host <step>=<host>[,<host>…]` overrides one step's host for a run.
 - `sflow hosts gc [--days 7]` deletes finished command jobs on the hosts.
 

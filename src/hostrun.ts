@@ -452,8 +452,10 @@ export class HostRouter implements SessionRuntime {
     }
     const tail = readFileSync(log, "utf8").split("\n").slice(-30).join("\n").slice(-4000);
     const argv = step.command!.join(" ");
-    const how = exit.error ? exit.error : exit.signal ? `killed by ${exit.signal}` : `exit ${exit.code}`;
-    let status: "done" | "failed" | "blocked" = evidence.length ? "blocked" : exit.code === 0 && !problems.length ? "done" : exit.code === 0 ? "blocked" : "failed";
+    const how = exit.error ? exit.error : exit.signal ? `killed by ${exit.signal}` : `exit ${exit.code}${exit.code !== 0 && step.allowFailure ? " (failure allowed: passed on as the result)" : ""}`;
+    // allowFailure: a command that ran and exited non-zero is still done; the exit code is the result.
+    const ok = exit.code === 0 || (step.allowFailure === true && typeof exit.code === "number" && !exit.error);
+    let status: "done" | "failed" | "blocked" = evidence.length ? "blocked" : ok && !problems.length ? "done" : ok ? "blocked" : "failed";
     const issues = [...evidence, ...problems];
     const receipt = {
       status, summary: `${argv} on ${s.host}: ${how}${issues.length ? `; ${issues.join(", ")}` : ""}`,

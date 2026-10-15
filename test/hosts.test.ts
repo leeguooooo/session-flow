@@ -254,7 +254,29 @@ test("a remote write step's changes come back as uncommitted edits in a local wo
   expect(mirror.mirror).toBeTruthy();
   expect(readFileSync(join(project, "tracked.txt"), "utf8")).toBe("dirty edit\n");
   await rt.finish(run);
-  expect(existsSync(remoteCwd)).toBe(false);
+  // The write directory stays for the next run on this slot (agents trust it once).
+  expect(existsSync(remoteCwd)).toBe(true);
+  expect(remoteCwd).toMatch(/\/host-mini\/state\/workspaces\/[0-9a-f]{16}\/0$/);
+  // A second run on the same host gets the same directory, fresh from HEAD; the first run's
+  // changes left there are saved as a patch, and its branch is gone.
+  writeFileSync(join(remoteCwd, "ignored.txt"), "build output\n");
+  const second = setup([{ id: "impl", agent: "codex", prompt: "x", policy: "workspace-write", worktree: true, host: "mini" }], { mini: run.hosts!.mini });
+  expect(await rt.placeAgent(second, second.workflow.steps[0])).toEqual({ ok: true });
+  expect(second.steps.impl.remote!.cwd).toBe(remoteCwd);
+  expect(readFileSync(join(remoteCwd, "tracked.txt"), "utf8")).toBe("committed\n");
+  expect(existsSync(join(remoteCwd, "added.bin"))).toBe(false);
+  expect(existsSync(join(remoteCwd, "ignored.txt"))).toBe(false);
+  const ws = join(remoteCwd, "..");
+  const saved = readdirSync(ws).filter(f => f.includes(".leftover-"));
+  expect(saved.length).toBe(1);
+  expect(readFileSync(join(ws, saved[0]), "utf8")).toContain("agent edit");
+  const bare = readFileSync(join(remoteCwd, ".git"), "utf8").match(/gitdir: (.+)\/worktrees\//)![1];
+  expect(git(bare, "branch", "--list", `sflow/${run.id}/impl`)).toBe("");
+  // Preparing the same step again (a resumed driver) leaves its work alone.
+  writeFileSync(join(remoteCwd, "work.txt"), "in progress\n");
+  delete second.steps.impl.remote;
+  expect(await rt.placeAgent(second, second.workflow.steps[0])).toEqual({ ok: true });
+  expect(readFileSync(join(remoteCwd, "work.txt"), "utf8")).toBe("in progress\n");
 }, 60_000);
 
 test("reports for a remote step count only from that host's channel; results are fetched and hash-checked", async () => {
@@ -376,8 +398,15 @@ test("gc keeps fresh mirrors and old runs driven on this host", async () => {
   expect(readdirSync(join(process.env.SFLOW_HOME, "slots"))).toHaveLength(2);
 });
 
-// Needs a real tmux; CI runners may not have one.
-test.skipIf(!Bun.which("tmux"))("gc keeps an old mirror with a real live tmux worker", async () => {
+// Needs a tmux that can start a server here; CI runners and agent sandboxes may not allow one.
+const tmuxWorks = (() => {
+  if (!Bun.which("tmux")) return false;
+  const sock = join(tmpdir(), `sf-probe-${process.pid}.sock`);
+  const ok = spawnSync("tmux", ["-S", sock, "new-session", "-d", "-s", "p", "sleep", "1"]).status === 0;
+  spawnSync("tmux", ["-S", sock, "kill-server"]); rmSync(sock, { force: true });
+  return ok;
+})();
+test.skipIf(!tmuxWorks)("gc keeps an old mirror with a real live tmux worker", async () => {
   process.env.SFLOW_HOME = join(base, "solo");
   const run = gcRun("00000000-0000-0000-0000-000000000004");
   const file = join(run.dir, "run.json"), old = new Date(Date.now() - 8 * 86400_000);
@@ -713,3 +742,35 @@ test("an assignment that cannot be built also gives a first round's host slot ba
   expect(run.steps.r.status as string).toBe("blocked");
   expect(stopped).toContain("r");
 });
+
+test("allowFailure passes a failing command on as a done result with its exit code", async () => {
+  const run = setup([{ id: "t", agent: "command", command: ["sh", "-c", "echo boom; exit 2"], allowFailure: true }], {});
+  const rt = router(), tr = new NoTransport();
+  await until(run, rt, tr, () => run.status !== "running");
+  expect(run.steps.t.status).toBe("done");
+  const r = resolveResult(run, "t", run.steps.t.result!) as any;
+  expect(r.details.exitCode).toBe(2);
+  expect(r.summary).toContain("failure allowed");
+  expect(() => parseWorkflow({ version: 1, name: "t", steps: [{ id: "a", agent: "codex", prompt: "x", cwd: project, allowFailure: true }] }, base)).toThrow("belong to");
+}, 60_000);
+
+test("a write step prefers a slot whose directory this project already has", async () => {
+  const run = setup([{ id: "impl", agent: "codex", prompt: "x", policy: "workspace-write", worktree: true, host: "mini" }], { mini: host("mini", { slots: 3 }) });
+  const rt = router();
+  // Slot 0 is busy with something else, so the first run lands on slot 1.
+  process.env.SFLOW_HOME = join(base, "host-mini", "state");
+  expect(await claimSlot("step:other:x", 3)).toBe("new");
+  delete process.env.SFLOW_HOME; process.env.SFLOW_HOME = join(base, "driver");
+  expect(await rt.placeAgent(run, run.workflow.steps[0])).toEqual({ ok: true });
+  const first = run.steps.impl.remote!.cwd!;
+  expect(first.endsWith("/1")).toBe(true);
+  await rt.stop(run, "impl").catch(() => {});
+  await new SshLink("mini", run.hosts!.mini).call("release", { runId: run.id, root: "impl" });
+  process.env.SFLOW_HOME = join(base, "host-mini", "state");
+  await (await import("../src/remote")).releaseSlot("step:other:x");
+  process.env.SFLOW_HOME = join(base, "driver");
+  // Slot 0 is free now, but the next run goes back to the directory it already trusted.
+  const second = setup([{ id: "impl", agent: "codex", prompt: "x", policy: "workspace-write", worktree: true, host: "mini" }], { mini: run.hosts!.mini });
+  expect(await rt.placeAgent(second, second.workflow.steps[0])).toEqual({ ok: true });
+  expect(second.steps.impl.remote!.cwd).toBe(first);
+}, 60_000);

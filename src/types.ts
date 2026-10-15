@@ -26,6 +26,8 @@ export interface Step {
   host?: string[];
   command?: string[];
   artifacts?: string[];
+  // A command whose failure is information for the next step (a test before review), not a stop.
+  allowFailure?: boolean;
 }
 export type Scalar = string | number | boolean;
 export interface Workflow {

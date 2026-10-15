@@ -45,9 +45,10 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
       if (!Array.isArray(s.command) || !s.command.length || s.command.length > 256 || s.command.some(a => typeof a !== "string" || !a || Buffer.byteLength(a) > 8192))
         throw new Error(`${s.id}: a command step needs command: ["program", "arg", …]`);
       for (const k of ["model", "worktree", "inPlace", "reuseSession"]) if (s[k] !== undefined) throw new Error(`${s.id}: ${k} does not apply to a command step`);
+      if (s.allowFailure !== undefined && typeof s.allowFailure !== "boolean") throw new Error(`${s.id}: allowFailure must be boolean`);
       if (s.policy !== undefined && s.policy !== "read-only") throw new Error(`${s.id}: a command step reads a frozen copy; it cannot write the project`);
       s.prompt ??= `run ${(s.command as string[]).join(" ")}`;
-    } else if (s.command !== undefined || s.artifacts !== undefined) throw new Error(`${s.id}: command and artifacts belong to agent: "command" steps`);
+    } else if (s.command !== undefined || s.artifacts !== undefined || s.allowFailure !== undefined) throw new Error(`${s.id}: command, artifacts and allowFailure belong to agent: "command" steps`);
     if (s.artifacts !== undefined && (!Array.isArray(s.artifacts) || s.artifacts.length > 64 ||
       s.artifacts.some(a => typeof a !== "string" || !a || isAbsolute(a) || a.split("/").includes("..") || a.includes("\0"))))
       throw new Error(`${s.id}: artifacts are paths inside the checkout`);
@@ -92,7 +93,7 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
       }
     }
     return { id: s.id, agent: isCommand ? "command" : s.agent as Agent, ...(isCommand ? { command: s.command as string[] } : {}),
-      ...(s.artifacts ? { artifacts: s.artifacts as string[] } : {}), ...(host ? { host: [...new Set(host as string[])].sort() } : {}), model: s.model as string | undefined, prompt: s.prompt, cwd,
+      ...(s.artifacts ? { artifacts: s.artifacts as string[] } : {}), ...(s.allowFailure ? { allowFailure: true } : {}), ...(host ? { host: [...new Set(host as string[])].sort() } : {}), model: s.model as string | undefined, prompt: s.prompt, cwd,
       dependsOn: deps as string[], policy, worktree: s.worktree as boolean | undefined,
       ...(s.inPlace ? { inPlace: true } : {}), ...(s.reuseSession !== undefined ? { reuseSession: s.reuseSession as string } : {}),
       ...(s.workspace !== undefined ? { workspace: s.workspace as string } : {}), ...(when ? { when } : {}), ...(expect ? { expect } : {}),

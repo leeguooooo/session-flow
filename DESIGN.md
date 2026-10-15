@@ -45,6 +45,17 @@ Dependency outputs are data, not instructions. Small results are inline; large r
 
 ## Permissions and resource ownership
 
+Every worker gets its own `TMPDIR`, `sflow-<run>-<step>` in the system temp
+directory (never inside sflow's state, where a project may not be), added to
+Codex's writable roots explicitly, so tests that create temp files run without a
+sandbox approval; Codex otherwise excludes `/tmp` and the inherited TMPDIR. Tool caches outside the run (for example `~/.bun` during an
+install) still ask once.
+
+Review verdicts separate blocking problems from minor ones: `needs-fix` only for
+wrong behaviour, a failing or missing check, data loss, a security hole or the
+task not met; everything else is reported as `minor:` checks with a `pass`, so
+repair rounds stop on what matters.
+
 Read-only Claude workers start in one stable, empty directory owned by sflow (`$SFLOW_HOME/workspaces/claude`) instead of the per-run `.protocol`, and get the run directory through `--add-dir`. Claude records folder trust per directory, so a per-run cwd asked for trust on every run; a stable one asks once per machine, and the user still makes that choice. Other read-only agents keep `.protocol`: Codex's sandbox write roots are scoped to the run there. Write steps start in their new worktree, so the native trust question for that folder remains.
 
 `sflow run` reports progress on stderr from what it observes (step status changes, menus on worker screens, a reminder after two quiet minutes) and never infers completion from a live process; stdout keeps the JSON contract. With a terminal on stdin, a typed option number answers the menu shown, after re-reading the screen and matching the prompt id. At the end, and through `sflow review`, it lists per step what the worker reported (resolved through the hash-checked result file, claims not rerun) and what sflow observed with git in each worktree, without prompts, tokens or transcripts. A readiness timeout records what the worker screen shows when it matches a known error pattern, otherwise "cause unknown"; on `resume`, a step blocked only by readiness whose session is still open returns to starting with a fresh window (same worker, no resend).
@@ -171,12 +182,28 @@ object directory in the run (alternates point at the project's objects).
   result is a worktree with uncommitted changes, exactly what a local write step
   leaves for review. Nothing is merged into the project.
 - The remote verifies the commit and tree it received before using them.
+- A write step's directory on a host is fixed per project and slot
+  (`workspaces/<repo>/<slot>`), because agents record folder trust per path: the
+  trust question comes once per slot, not once per run. Reuse switches it to the
+  new step's branch at the new commit and removes everything else, ignored files
+  included (`git clean -ffdx`), so it starts as a new worktree would. Changes a
+  previous run left there are saved first as `<slot>.leftover-<branch>-<time>.patch`
+  next to it; the previous `sflow/…` branch is deleted. The same step preparing
+  again (a resumed driver) keeps the directory as it is. `cleanup` leaves
+  workspaces in place; `gc` removes leftover patches past its cutoff.
 
 `inPlace` steps cannot have a host. `workspace` and `reuseSession` chains stay on
 one host. In-place observation snapshots do not apply to remote readers: they read
 a frozen copy, so their writes cannot reach the checkout.
 
 ### Command steps
+
+`allowFailure: true` on a command step records a non-zero exit as `done`, the exit
+code being the result: a test before a review is information, not a stop.
+`sflow init … --test "<cmd>"` inserts such a step after the write step and after
+every fix round; each review depends on its round's test and is told to treat a
+failing exit as blocking. `--host role=hosts` places plan, implement (and its fix
+rounds), review and test steps.
 
 `agent: "command"` with `command: [argv]` runs a program instead of an agent:
 builds and tests. It reads `cwd` or the worktree of `workspace: <write step>`

@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { checked, command, cleanEnv, quote } from "./process";
 import { sessionRoot } from "./config";
 import { saveRun } from "./store";
@@ -55,6 +55,11 @@ export class TmuxRuntime implements SessionRuntime {
     // per-worker protocol wrapper restores only this run's context; no global
     // shell_environment_policy override or credential inheritance is required.
     const protocol = join(dir, "worker");
+    // A private temp directory the worker may write, so tests that create temp files run without a
+    // sandbox approval (Codex excludes /tmp and the inherited TMPDIR; this one is added explicitly).
+    // It sits in the system temp, not in sflow's state: a project must never be inside that.
+    const tmp = join(tmpdir(), `sflow-${run.id.slice(0, 8)}-${step.id}`);
+    mkdirSync(tmp, { mode: 0o700, recursive: true });
     const contextEnv: Record<string, string> = {
       SFLOW_HOME: process.env.SFLOW_HOME ?? join(homedir(), ".local/state/session-flow"),
       SFLOW_RUN_ID: run.id, SFLOW_STEP_ID: step.id, SFLOW_TOKEN: state.token,
@@ -107,7 +112,7 @@ Report once using ${cliText} report done '<summary>' (or failed/blocked), adding
       argv = ["codex", "--no-alt-screen", "--no-daemon", "--sandbox", "workspace-write",
         "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
         "--ask-for-approval", "on-request", "--add-dir", step.policy === "read-only" ? commonCwd : dir,
-        "--add-dir", commonCwd,
+        "--add-dir", commonCwd, "--add-dir", tmp,
         "--add-dir", process.env.OCS_HOME ?? join(homedir(), ".ocs")];
       if (step.model) argv.push("--model", step.model);
       argv.push("--", prompt);
@@ -117,7 +122,7 @@ Report once using ${cliText} report done '<summary>' (or failed/blocked), adding
     // identity flags so OCS never attributes the worker to its creator.
     for (const key of ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "OCS_HOME"]) if (process.env[key]) env[key] = process.env[key];
     const script = join(dir, "start.sh");
-    writeFileSync(script, `#!/bin/sh\nexec ${argv.map(quote).join(" ")}\n`, { mode: 0o700 }); chmodSync(script, 0o700);
+    writeFileSync(script, `#!/bin/sh\nexport TMPDIR=${quote(tmp)}\nexec ${argv.map(quote).join(" ")}\n`, { mode: 0o700 }); chmodSync(script, 0o700);
     const workerEnv = ["OCS_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"]
       .flatMap(key => env[key] === undefined ? [] : ["-e", `${key}=${env[key]}`]);
     await checked([this.binary, "-S", run.socket, "new-session", "-d", "-s", state.session, ...workerEnv,

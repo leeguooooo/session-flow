@@ -88,14 +88,16 @@ function stale(owner: string): boolean {
 }
 // "held": this owner already had a slot (a retained session); "new": claimed now; false: none free.
 type Claim = { kind: "held" | "new"; slot: number };
-function claimLocked(owner: string, slots: number): Claim | false {
+// prefer: slot numbers to try first (where this project already has a trusted write directory).
+function claimLocked(owner: string, slots: number, prefer: number[] = []): Claim | false {
   const mine = slotOwners().find(s => s.owner === owner);
   if (mine) {
     // A renewed claim restarts gc's grace period: the driver is using this slot again.
     writeFileSync(join(slotsDir(), mine.slot, "owner.json"), JSON.stringify({ owner, since: Date.now() }), { mode: 0o600 });
     return { kind: "held", slot: Number(mine.slot) };
   }
-  for (let i = 0; i < slots; i++) {
+  const order = [...new Set([...prefer.filter(n => Number.isInteger(n) && n >= 0 && n < slots), ...Array.from({ length: slots }, (_, n) => n)])];
+  for (const i of order) {
     const path = join(slotsDir(), String(i));
     if (existsSync(path)) {
       if (!stale(readJSON(join(path, "owner.json"))?.owner ?? "")) continue;
@@ -108,7 +110,7 @@ function claimLocked(owner: string, slots: number): Claim | false {
   return false;
 }
 export async function claimSlot(owner: string, slots: number) { const c = await withLock(() => claimLocked(owner, slots)); return c ? c.kind : false; }
-function claimSlotAt(owner: string, slots: number) { return withLock(() => claimLocked(owner, slots)); }
+function claimSlotAt(owner: string, slots: number, prefer: number[]) { return withLock(() => claimLocked(owner, slots, prefer)); }
 function releaseLocked(owner: string) {
   for (const s of slotOwners()) if (s.owner === owner) rmSync(join(slotsDir(), s.slot), { recursive: true, force: true });
 }
@@ -331,7 +333,10 @@ async function prepareMirror(input: any) {
   const step = run.workflow.steps.find(s => s.id === stepId);
   if (!step) throw new Error("step missing from mirror");
   const root = sessionRoot(run.workflow.steps, step), owner = `step:${run.id}:${root}`;
-  const claim = await claimSlotAt(owner, Number(input.slots));
+  const writes = (input.checkouts ?? []).find((c: Checkout) => c.branch) as Checkout | undefined;
+  const known = writes && /^[0-9a-f]{16}$/.test(writes.repo) && existsSync(join(dataHome(), "workspaces", writes.repo))
+    ? readdirSync(join(dataHome(), "workspaces", writes.repo)).filter(n => /^\d+$/.test(n)).map(Number) : [];
+  const claim = await claimSlotAt(owner, Number(input.slots), known);
   if (!claim) return { state: "busy" };
   // Checkouts the step reads or writes, then remote paths for every driver path they replace.
   const pathMap: Record<string, string> = {};

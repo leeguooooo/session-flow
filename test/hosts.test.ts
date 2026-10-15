@@ -746,3 +746,24 @@ test("allowFailure passes a failing command on as a done result with its exit co
   expect(r.summary).toContain("failure allowed");
   expect(() => parseWorkflow({ version: 1, name: "t", steps: [{ id: "a", agent: "codex", prompt: "x", cwd: project, allowFailure: true }] }, base)).toThrow("belong to");
 }, 60_000);
+
+test("a write step prefers a slot whose directory this project already has", async () => {
+  const run = setup([{ id: "impl", agent: "codex", prompt: "x", policy: "workspace-write", worktree: true, host: "mini" }], { mini: host("mini", { slots: 3 }) });
+  const rt = router();
+  // Slot 0 is busy with something else, so the first run lands on slot 1.
+  process.env.SFLOW_HOME = join(base, "host-mini", "state");
+  expect(await claimSlot("step:other:x", 3)).toBe("new");
+  delete process.env.SFLOW_HOME; process.env.SFLOW_HOME = join(base, "driver");
+  expect(await rt.placeAgent(run, run.workflow.steps[0])).toEqual({ ok: true });
+  const first = run.steps.impl.remote!.cwd!;
+  expect(first.endsWith("/1")).toBe(true);
+  await rt.stop(run, "impl").catch(() => {});
+  await new SshLink("mini", run.hosts!.mini).call("release", { runId: run.id, root: "impl" });
+  process.env.SFLOW_HOME = join(base, "host-mini", "state");
+  await (await import("../src/remote")).releaseSlot("step:other:x");
+  process.env.SFLOW_HOME = join(base, "driver");
+  // Slot 0 is free now, but the next run goes back to the directory it already trusted.
+  const second = setup([{ id: "impl", agent: "codex", prompt: "x", policy: "workspace-write", worktree: true, host: "mini" }], { mini: run.hosts!.mini });
+  expect(await rt.placeAgent(second, second.workflow.steps[0])).toEqual({ ok: true });
+  expect(second.steps.impl.remote!.cwd).toBe(first);
+}, 60_000);

@@ -254,7 +254,29 @@ test("a remote write step's changes come back as uncommitted edits in a local wo
   expect(mirror.mirror).toBeTruthy();
   expect(readFileSync(join(project, "tracked.txt"), "utf8")).toBe("dirty edit\n");
   await rt.finish(run);
-  expect(existsSync(remoteCwd)).toBe(false);
+  // The write directory stays for the next run on this slot (agents trust it once).
+  expect(existsSync(remoteCwd)).toBe(true);
+  expect(remoteCwd).toMatch(/\/host-mini\/state\/workspaces\/[0-9a-f]{16}\/0$/);
+  // A second run on the same host gets the same directory, fresh from HEAD; the first run's
+  // changes left there are saved as a patch, and its branch is gone.
+  writeFileSync(join(remoteCwd, "ignored.txt"), "build output\n");
+  const second = setup([{ id: "impl", agent: "codex", prompt: "x", policy: "workspace-write", worktree: true, host: "mini" }], { mini: run.hosts!.mini });
+  expect(await rt.placeAgent(second, second.workflow.steps[0])).toEqual({ ok: true });
+  expect(second.steps.impl.remote!.cwd).toBe(remoteCwd);
+  expect(readFileSync(join(remoteCwd, "tracked.txt"), "utf8")).toBe("committed\n");
+  expect(existsSync(join(remoteCwd, "added.bin"))).toBe(false);
+  expect(existsSync(join(remoteCwd, "ignored.txt"))).toBe(false);
+  const ws = join(remoteCwd, "..");
+  const saved = readdirSync(ws).filter(f => f.includes(".leftover-"));
+  expect(saved.length).toBe(1);
+  expect(readFileSync(join(ws, saved[0]), "utf8")).toContain("agent edit");
+  const bare = readFileSync(join(remoteCwd, ".git"), "utf8").match(/gitdir: (.+)\/worktrees\//)![1];
+  expect(git(bare, "branch", "--list", `sflow/${run.id}/impl`)).toBe("");
+  // Preparing the same step again (a resumed driver) leaves its work alone.
+  writeFileSync(join(remoteCwd, "work.txt"), "in progress\n");
+  delete second.steps.impl.remote;
+  expect(await rt.placeAgent(second, second.workflow.steps[0])).toEqual({ ok: true });
+  expect(readFileSync(join(remoteCwd, "work.txt"), "utf8")).toBe("in progress\n");
 }, 60_000);
 
 test("reports for a remote step count only from that host's channel; results are fetched and hash-checked", async () => {
@@ -713,3 +735,14 @@ test("an assignment that cannot be built also gives a first round's host slot ba
   expect(run.steps.r.status as string).toBe("blocked");
   expect(stopped).toContain("r");
 });
+
+test("allowFailure passes a failing command on as a done result with its exit code", async () => {
+  const run = setup([{ id: "t", agent: "command", command: ["sh", "-c", "echo boom; exit 2"], allowFailure: true }], {});
+  const rt = router(), tr = new NoTransport();
+  await until(run, rt, tr, () => run.status !== "running");
+  expect(run.steps.t.status).toBe("done");
+  const r = resolveResult(run, "t", run.steps.t.result!) as any;
+  expect(r.details.exitCode).toBe(2);
+  expect(r.summary).toContain("failure allowed");
+  expect(() => parseWorkflow({ version: 1, name: "t", steps: [{ id: "a", agent: "codex", prompt: "x", cwd: project, allowFailure: true }] }, base)).toThrow("belong to");
+}, 60_000);

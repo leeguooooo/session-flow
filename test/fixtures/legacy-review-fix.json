@@ -18,7 +18,7 @@
       "dependsOn": [
         "implement"
       ],
-      "prompt": "Task under review: snapshot-task\nFind the worktree path in the implement dependency result (details.workspace). Inspect the actual change there yourself: git -C <path> status and git -C <path> diff. Rerun the key checks when you can do so without editing. Do not rely on the implementer's summary.\nDo not edit, commit or merge. Report done with findings (problems first, each with file and line), and whether the task is met; report blocked if the worktree or evidence is missing.\nEnd with a verdict in details.verdict: \"pass\" if the task is met with no problem that must be fixed first, otherwise \"needs-fix\" with the problems to fix listed first. Report it with: report done '<summary>' --detail verdict=pass (or verdict=needs-fix), adding --check for what you ran."
+      "prompt": "Task under review: snapshot-task\nFind the worktree path in the implement dependency result (details.workspace). Inspect the actual change there yourself: git -C <path> status and git -C <path> diff. Rerun the key checks when you can do so without editing. Do not rely on the implementer's summary.\nDo not edit, commit or merge. Report done with findings (problems first, each with file and line), and whether the task is met; report blocked if the worktree or evidence is missing.\nEnd with a verdict in details.verdict. \"needs-fix\" only for problems that block accepting the change: wrong behaviour, a failing or missing check the task needs, data loss, a security hole, or the task not met. List those first, each with file and line. Everything else (style, naming, a rare edge case, a nice-to-have test) is minor: report it as --check 'minor: <what and where>' and still give \"pass\". Report it with: report done '<summary>' --detail verdict=pass (or verdict=needs-fix), adding --check for what you ran."
     },
     {
       "id": "fix-1",
@@ -34,7 +34,7 @@
           "details.verdict": "needs-fix"
         }
       },
-      "prompt": "Task: snapshot-task\nA reviewer found problems in the change in this worktree (your current working directory). Read the review-1 dependency result and fix what it lists, nothing else. Keep the existing uncommitted changes; do not reset, stash or recreate the worktree. Rerun the relevant checks. Do not commit, push or merge.\nReport done with: summary of what you changed for each finding; details.workspace = absolute path of the worktree; checks with what you ran. Report blocked if a finding cannot be fixed as described."
+      "prompt": "Task: snapshot-task\nA reviewer found problems in the change in this worktree (your current working directory). Read the review-1 dependency result and fix what it lists as blocking (items marked minor are optional), nothing else. If the review quotes a failing test, run that test yourself until it passes. Keep the existing uncommitted changes; do not reset, stash or recreate the worktree. Rerun the relevant checks. Do not commit, push or merge.\nReport done with: summary of what you changed for each finding; details.workspace = absolute path of the worktree; checks with what you ran. Report blocked if a finding cannot be fixed as described."
     },
     {
       "id": "review-2",
@@ -49,7 +49,7 @@
           "status": "done"
         }
       },
-      "prompt": "Task under review: snapshot-task\nFind the worktree path in the fix-1 dependency result (details.workspace). Inspect the actual change there yourself: git -C <path> status and git -C <path> diff. Rerun the key checks when you can do so without editing. Do not rely on the implementer's summary.\nDo not edit, commit or merge. Report done with findings (problems first, each with file and line), and whether the task is met; report blocked if the worktree or evidence is missing.\nThe review-1 dependency result lists what the previous review asked to fix; check each item and look for new problems.\nEnd with a verdict in details.verdict: \"pass\" if the task is met with no problem that must be fixed first, otherwise \"needs-fix\" with the problems to fix listed first. Report it with: report done '<summary>' --detail verdict=pass (or verdict=needs-fix), adding --check for what you ran."
+      "prompt": "Task under review: snapshot-task\nFind the worktree path in the fix-1 dependency result (details.workspace). Inspect the actual change there yourself: git -C <path> status and git -C <path> diff. Rerun the key checks when you can do so without editing. Do not rely on the implementer's summary.\nDo not edit, commit or merge. Report done with findings (problems first, each with file and line), and whether the task is met; report blocked if the worktree or evidence is missing.\nThe review-1 dependency result lists what the previous review asked to fix; check each item and look for new problems.\nEnd with a verdict in details.verdict. \"needs-fix\" only for problems that block accepting the change: wrong behaviour, a failing or missing check the task needs, data loss, a security hole, or the task not met. List those first, each with file and line. Everything else (style, naming, a rare edge case, a nice-to-have test) is minor: report it as --check 'minor: <what and where>' and still give \"pass\". Report it with: report done '<summary>' --detail verdict=pass (or verdict=needs-fix), adding --check for what you ran."
     },
     {
       "id": "fix-2",
@@ -65,7 +65,7 @@
           "details.verdict": "needs-fix"
         }
       },
-      "prompt": "Task: snapshot-task\nA reviewer found problems in the change in this worktree (your current working directory). Read the review-2 dependency result and fix what it lists, nothing else. Keep the existing uncommitted changes; do not reset, stash or recreate the worktree. Rerun the relevant checks. Do not commit, push or merge.\nReport done with: summary of what you changed for each finding; details.workspace = absolute path of the worktree; checks with what you ran. Report blocked if a finding cannot be fixed as described."
+      "prompt": "Task: snapshot-task\nA reviewer found problems in the change in this worktree (your current working directory). Read the review-2 dependency result and fix what it lists as blocking (items marked minor are optional), nothing else. If the review quotes a failing test, run that test yourself until it passes. Keep the existing uncommitted changes; do not reset, stash or recreate the worktree. Rerun the relevant checks. Do not commit, push or merge.\nReport done with: summary of what you changed for each finding; details.workspace = absolute path of the worktree; checks with what you ran. Report blocked if a finding cannot be fixed as described."
     },
     {
       "id": "review-3",
@@ -80,7 +80,7 @@
           "status": "done"
         }
       },
-      "prompt": "Task under review: snapshot-task\nFind the worktree path in the fix-2 dependency result (details.workspace). Inspect the actual change there yourself: git -C <path> status and git -C <path> diff. Rerun the key checks when you can do so without editing. Do not rely on the implementer's summary.\nDo not edit, commit or merge. Report done with findings (problems first, each with file and line), and whether the task is met; report blocked if the worktree or evidence is missing.\nThe review-2 dependency result lists what the previous review asked to fix; check each item and look for new problems.\nEnd with a verdict in details.verdict: \"pass\" if the task is met with no problem that must be fixed first, otherwise \"needs-fix\" with the problems to fix listed first. Report it with: report done '<summary>' --detail verdict=pass (or verdict=needs-fix), adding --check for what you ran.",
+      "prompt": "Task under review: snapshot-task\nFind the worktree path in the fix-2 dependency result (details.workspace). Inspect the actual change there yourself: git -C <path> status and git -C <path> diff. Rerun the key checks when you can do so without editing. Do not rely on the implementer's summary.\nDo not edit, commit or merge. Report done with findings (problems first, each with file and line), and whether the task is met; report blocked if the worktree or evidence is missing.\nThe review-2 dependency result lists what the previous review asked to fix; check each item and look for new problems.\nEnd with a verdict in details.verdict. \"needs-fix\" only for problems that block accepting the change: wrong behaviour, a failing or missing check the task needs, data loss, a security hole, or the task not met. List those first, each with file and line. Everything else (style, naming, a rare edge case, a nice-to-have test) is minor: report it as --check 'minor: <what and where>' and still give \"pass\". Report it with: report done '<summary>' --detail verdict=pass (or verdict=needs-fix), adding --check for what you ran.",
       "expect": {
         "details.verdict": "pass"
       }

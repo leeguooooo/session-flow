@@ -15,7 +15,9 @@ export function describe(workflow: Workflow): string[] {
   for (const s of workflow.steps) {
     if (s.agent === "command") {
       lines.push(`  ${s.id}: command \`${s.command!.join(" ")}\` on ${s.host ? `host ${s.host.join(" or ")}` : "this machine"}, reading a frozen copy of ${s.workspace ? `${s.workspace}'s worktree` : s.cwd}` +
-        `${s.dependsOn.length ? `, after ${s.dependsOn.join(", ")}` : ""}${s.artifacts?.length ? `, brings back ${s.artifacts.join(", ")}` : ""}`);
+        `${s.dependsOn.length ? `, after ${s.dependsOn.join(", ")}` : ""}${s.artifacts?.length ? `, brings back ${s.artifacts.join(", ")}` : ""}` +
+        `${s.when ? `, only if ${Object.entries(s.when).map(([d, f]) => `${d} ${Object.entries(f).map(([k, v]) => `${k}=${v}`).join(" ")}`).join(" and ")}` : ""}` +
+        `${s.allowFailure ? ", a failing exit is passed on as its result" : ""}`);
       continue;
     }
     lines.push(`  ${s.id}: ${s.agent}${s.model ? ` (${s.model})` : ""}${s.host ? ` on host ${s.host.join(" or ")}` : ""}, ${s.inPlace ? "WRITES DIRECTLY IN CHECKOUT" : s.workspace ? `writes in ${s.workspace}'s workspace of` : s.policy === "workspace-write" ? "writes in a new git worktree of" : "read-only on"} ${s.cwd}` +

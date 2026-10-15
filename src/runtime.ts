@@ -55,6 +55,10 @@ export class TmuxRuntime implements SessionRuntime {
     // per-worker protocol wrapper restores only this run's context; no global
     // shell_environment_policy override or credential inheritance is required.
     const protocol = join(dir, "worker");
+    // A private temp directory inside the paths the worker may write: tests that create temp files
+    // run without a sandbox approval (Codex excludes /tmp and the inherited TMPDIR).
+    const tmp = step.policy === "read-only" ? join(commonCwd, "tmp", step.id) : join(dir, "tmp");
+    mkdirSync(tmp, { mode: 0o700, recursive: true });
     const contextEnv: Record<string, string> = {
       SFLOW_HOME: process.env.SFLOW_HOME ?? join(homedir(), ".local/state/session-flow"),
       SFLOW_RUN_ID: run.id, SFLOW_STEP_ID: step.id, SFLOW_TOKEN: state.token,
@@ -117,7 +121,7 @@ Report once using ${cliText} report done '<summary>' (or failed/blocked), adding
     // identity flags so OCS never attributes the worker to its creator.
     for (const key of ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "OCS_HOME"]) if (process.env[key]) env[key] = process.env[key];
     const script = join(dir, "start.sh");
-    writeFileSync(script, `#!/bin/sh\nexec ${argv.map(quote).join(" ")}\n`, { mode: 0o700 }); chmodSync(script, 0o700);
+    writeFileSync(script, `#!/bin/sh\nexport TMPDIR=${quote(tmp)}\nexec ${argv.map(quote).join(" ")}\n`, { mode: 0o700 }); chmodSync(script, 0o700);
     const workerEnv = ["OCS_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"]
       .flatMap(key => env[key] === undefined ? [] : ["-e", `${key}=${env[key]}`]);
     await checked([this.binary, "-S", run.socket, "new-session", "-d", "-s", state.session, ...workerEnv,

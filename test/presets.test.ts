@@ -42,3 +42,29 @@ test("in-place and session retention are separate explicit options", () => {
   expect(p.steps.find(s => s.id === "implement")!.worktree).toBeUndefined();
   expect(p.steps.find(s => s.id === "fix-1")!.reuseSession).toBe("implement");
 });
+
+test("--test gates every write round and --host places roles", () => {
+  const wf = buildPreset("implement-review-fix", { task: "t", cwd: ".", write: true, rounds: 2, test: "bun test",
+    hosts: { implement: ["box"], review: ["mini"], test: ["mini", "box"] } }) as { steps: Record<string, any>[] };
+  const by = Object.fromEntries(wf.steps.map(s => [s.id, s]));
+  expect(Object.keys(by)).toEqual(["implement", "test-0", "review-1", "fix-1", "test-1", "review-2", "fix-2", "test-2", "review-3"]);
+  expect(by["test-0"]).toMatchObject({ agent: "command", command: ["sh", "-c", "bun test"], workspace: "implement", allowFailure: true, dependsOn: ["implement"], host: ["mini", "box"] });
+  expect(by["test-1"]).toMatchObject({ dependsOn: ["fix-1"], when: { "fix-1": { status: "done" } } });
+  expect(by["review-1"].dependsOn).toEqual(["implement", "test-0"]);
+  expect(by["review-2"].dependsOn).toContain("test-1");
+  expect(by["review-2"].prompt).toContain("test-1 dependency is a command step");
+  expect(by["fix-1"].host).toEqual(["box"]); expect(by["review-3"].host).toEqual(["mini"]);
+  expect(by["review-3"].expect).toEqual({ "details.verdict": "pass" });
+  expect(() => buildPreset("review", { task: "t", cwd: ".", test: "x" })).toThrow("does not write");
+  expect(() => buildPreset("implement-review", { task: "t", cwd: ".", write: true, hosts: { plan: ["box"] } })).toThrow("no plan step");
+  expect(() => buildPreset("implement-review", { task: "t", cwd: ".", write: true, inPlace: true, hosts: { implement: ["box"] } })).toThrow("cannot run on another host");
+  // The gated preset passes normal validation.
+  parseWorkflow(wf, process.cwd());
+});
+
+test("reviews say what is blocking and what is minor", () => {
+  const wf = buildPreset("implement-review-fix", { task: "t", cwd: ".", write: true }) as { steps: Record<string, any>[] };
+  const review = wf.steps.find(s => s.id === "review-1")!;
+  expect(review.prompt).toContain("needs-fix\" only for problems that block");
+  expect(review.prompt).toContain("--check 'minor:");
+});

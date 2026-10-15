@@ -140,7 +140,7 @@ worker 通过机器可读的 OCS 事件上报"已接受"和唯一一条最终结
 
 新开的原生会话可能会弹出目录信任、登录或工具审批的提示，sflow 从不自己替你选。你可以在 `sflow run` 的终端里输入选项编号回答；也可以由驱动这次运行的 agent 在对话里问你，再用 `sflow answer <run-id> <step-id> <prompt-id> <n>` 把你的选择传过去（prompt id 来自 `sflow status`）。两种方式都只在屏幕上仍是你看到的那个提示时才发送按键。`sflow attach` 照样能用。提示还在屏幕上时，就绪超时会继续等（最长到步骤超时），回答后重新计时；如果驱动器已经停了，`sflow resume` 会给仍开着的 worker 一个新的就绪窗口。worker 没按时接单时，错误信息会引用它屏幕上看到的内容（比如后端或登录错误），认不出就写"原因未知"；只有屏幕上真有提示时才会提到提示。
 
-只读的 Claude 步骤统一在 sflow 自己的空目录 `~/.local/state/session-flow/workspaces/claude` 里启动，所以 Claude 每台机器只问一次信任，不再每次运行都问。这次信任只覆盖这个目录，里面没有项目代码；运行文件都按绝对路径传入。写入步骤在新建的 worktree 里启动，所以 Claude 或 Codex 会问这个目录（Codex 会把信任应用到仓库根目录）。标准审批保持开启；这个版本不承诺无人值守执行。对 Claude 来说，read-only 禁用文件编辑工具，但 shell 操作仍走原生的权限确认。Pi 的只读步骤不能通过 Pi 的工具编辑或写文件，但仍能执行 shell 命令。agy 每条命令执行前都会询问；给调度脚本选「本次对话内始终允许」，交结果时就不会再问一次。Codex 评审 worker 可以写协议/结果文件和 OCS 消息，被评审的仓库则不在它的沙箱可写目录里。
+只读的 Claude 步骤统一在 sflow 自己的空目录 `~/.local/state/session-flow/workspaces/claude` 里启动，所以 Claude 每台机器只问一次信任，不再每次运行都问。这次信任只覆盖这个目录，里面没有项目代码；运行文件都按绝对路径传入。写入步骤在新建的 worktree 里启动，所以 Claude 或 Codex 会问这个目录（Codex 会把信任应用到仓库根目录）。每个 worker 有自己可写的 `TMPDIR`，会建临时文件的测试不用再审批；工具把缓存写到 run 之外（比如 `bun install`）时仍会问一次。标准审批保持开启；这个版本不承诺无人值守执行。对 Claude 来说，read-only 禁用文件编辑工具，但 shell 操作仍走原生的权限确认。Pi 的只读步骤不能通过 Pi 的工具编辑或写文件，但仍能执行 shell 命令。agy 每条命令执行前都会询问；给调度脚本选「本次对话内始终允许」，交结果时就不会再问一次。Codex 评审 worker 可以写协议/结果文件和 OCS 消息，被评审的仓库则不在它的沙箱可写目录里。
 
 Ctrl-C 只停掉驱动器，worker 继续保留。记下打印出来的 run ID：
 
@@ -179,6 +179,8 @@ sflow hosts check                     # sflow 版本、工具、负载、剩余�
 - agent 步骤也可以带 host。原生会话跑在那台机器上（那边要装好并登录对应的 CLI，还要有 tmux 和 ocs）；`status`、`logs`、`answer`、`attach` 用法不变。写入步骤的改动会以未提交修改的形式回到本机的 worktree，和本地写入步骤一样。`inPlace` 步骤只能在本机；`workspace` 和 `reuseSession` 链必须在同一台机器上。
 - run 启动时会把用到的主机配置复制进 run，之后改 `hosts.json` 不影响正在跑或 resume 的 run。
 - workflow 的 `concurrency` 同时限制 agent 会话和运行中的 command 步骤，两者合计不超过它。
+- 远端写入步骤在每个项目、每个槽位固定的目录里工作，codex 或 claude 每个槽位只问一次信任（默认 2 个槽位），不再每次 run 都问。每个新步骤会把目录重置到 HEAD；之前 run 留下的改动先存成旁边的 `.leftover-….patch`。
+- 一行加测试关卡：`sflow init implement-review-fix --task "…" --write --test "bun test" --host implement=box --host review=mini --host test=mini` 会在实现后和每轮修复后跑测试，每轮审查都会读测试结果。测试失败会作为结果交给审查（`allowFailure`），由审查要求修复。
 - 模板里也能写 `host` 和 command 步骤；`sflow start --host <步骤>=<主机>[,<主机>…]` 可以为这一次 run 改某个步骤的主机。
 - `sflow hosts gc [--days 7]` 清理主机上已结束的 command 任务。
 

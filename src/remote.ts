@@ -87,12 +87,13 @@ function stale(owner: string): boolean {
   return existsSync(join(dir, "cancel.json"));
 }
 // "held": this owner already had a slot (a retained session); "new": claimed now; false: none free.
-function claimLocked(owner: string, slots: number): "held" | "new" | false {
+type Claim = { kind: "held" | "new"; slot: number };
+function claimLocked(owner: string, slots: number): Claim | false {
   const mine = slotOwners().find(s => s.owner === owner);
   if (mine) {
     // A renewed claim restarts gc's grace period: the driver is using this slot again.
     writeFileSync(join(slotsDir(), mine.slot, "owner.json"), JSON.stringify({ owner, since: Date.now() }), { mode: 0o600 });
-    return "held";
+    return { kind: "held", slot: Number(mine.slot) };
   }
   for (let i = 0; i < slots; i++) {
     const path = join(slotsDir(), String(i));
@@ -102,11 +103,12 @@ function claimLocked(owner: string, slots: number): "held" | "new" | false {
     }
     mkdirSync(path, { mode: 0o700 });
     writeFileSync(join(path, "owner.json"), JSON.stringify({ owner, since: Date.now() }), { mode: 0o600 });
-    return "new";
+    return { kind: "new", slot: i };
   }
   return false;
 }
-export function claimSlot(owner: string, slots: number) { return withLock(() => claimLocked(owner, slots)); }
+export async function claimSlot(owner: string, slots: number) { const c = await withLock(() => claimLocked(owner, slots)); return c ? c.kind : false; }
+function claimSlotAt(owner: string, slots: number) { return withLock(() => claimLocked(owner, slots)); }
 function releaseLocked(owner: string) {
   for (const s of slotOwners()) if (s.owner === owner) rmSync(join(slotsDir(), s.slot), { recursive: true, force: true });
 }
@@ -263,8 +265,38 @@ function mirrorRun(id: string): Run {
 }
 function checkoutsDir(runId: string) { return join(dataHome(), "checkouts", runId); }
 interface Checkout { repo: string; commit: string; tree: string; name: string; branch?: string }
-async function checkout(runId: string, c: Checkout): Promise<string> {
+// A write step's directory is fixed per project and host slot, so an agent's per-folder trust is
+// asked once per slot instead of once per run. Reuse starts it fresh from the new commit (ignored
+// files too, as a new worktree would); unfinished changes another run left there are saved first.
+async function workspace(c: Checkout, slot: number): Promise<string> {
+  const bare = bareRepo(dataHome(), c.repo), root = join(dataHome(), "workspaces", c.repo), path = join(root, String(slot));
+  await verifyCommit(bare, c.commit, c.tree);
+  if (!c.branch || !/^sflow\/[0-9a-f-]{36}\/[a-z][a-z0-9-]{0,39}$/.test(c.branch)) throw new Error("invalid workspace branch");
+  if (!existsSync(path)) {
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    await checked(["git", "-C", bare, "worktree", "prune"]).catch(() => "");
+    await checked(["git", "-C", bare, "worktree", "add", "--quiet", "-b", c.branch, path, c.commit], { timeoutMs: 600_000 });
+    return realpathSync(path);
+  }
+  const common = realpathSync(resolve(path, (await checked(["git", "-C", path, "rev-parse", "--git-common-dir"])).trim()));
+  if (common !== realpathSync(bare)) throw new Error(`${path} is not a workspace of ${bare}; inspect it`);
+  const current = (await checked(["git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD"])).trim();
+  // The same step preparing again (a resumed driver): its work is in there; leave it.
+  if (current === c.branch) return realpathSync(path);
+  const left = await freeze(path, "", { TMPDIR: root });
+  const head = (await checked(["git", "-C", path, "rev-parse", "HEAD"])).trim();
+  if (left.tree !== (await checked(["git", "-C", path, "rev-parse", "HEAD^{tree}"])).trim()) {
+    const diff = await checked(["git", "-C", path, "diff", "--binary", "--no-ext-diff", head, left.commit], { timeoutMs: 300_000 });
+    writeFileSync(join(root, `${slot}.leftover-${current.replace(/\//g, "_")}-${Date.now()}.patch`), diff, { mode: 0o600 });
+  }
+  await checked(["git", "-C", path, "checkout", "--quiet", "-f", "-B", c.branch, c.commit], { timeoutMs: 600_000 });
+  await checked(["git", "-C", path, "clean", "-ffdxq"], { timeoutMs: 600_000 });
+  if (/^sflow\//.test(current)) await command(["git", "-C", bare, "branch", "-D", current]).catch(() => {});
+  return realpathSync(path);
+}
+async function checkout(runId: string, c: Checkout, slot: number): Promise<string> {
   if (!/^[a-z0-9-]{1,80}$/.test(c.name)) throw new Error("invalid checkout name");
+  if (c.branch) return workspace(c, slot);
   const bare = bareRepo(dataHome(), c.repo), path = join(checkoutsDir(runId), c.name);
   await verifyCommit(bare, c.commit, c.tree);
   if (existsSync(path)) {
@@ -273,8 +305,7 @@ async function checkout(runId: string, c: Checkout): Promise<string> {
     return path;
   }
   mkdirSync(checkoutsDir(runId), { recursive: true, mode: 0o700 });
-  const args = c.branch ? ["-b", c.branch] : ["--detach"];
-  await checked(["git", "-C", bare, "worktree", "add", "--quiet", ...args, path, c.commit], { timeoutMs: 600_000 });
+  await checked(["git", "-C", bare, "worktree", "add", "--quiet", "--detach", path, c.commit], { timeoutMs: 600_000 });
   return realpathSync(path);
 }
 export async function prepare(input: any) {
@@ -300,19 +331,19 @@ async function prepareMirror(input: any) {
   const step = run.workflow.steps.find(s => s.id === stepId);
   if (!step) throw new Error("step missing from mirror");
   const root = sessionRoot(run.workflow.steps, step), owner = `step:${run.id}:${root}`;
-  const claim = await claimSlot(owner, Number(input.slots));
+  const claim = await claimSlotAt(owner, Number(input.slots));
   if (!claim) return { state: "busy" };
   // Checkouts the step reads or writes, then remote paths for every driver path they replace.
   const pathMap: Record<string, string> = {};
   try {
     for (const c of (input.checkouts ?? []) as (Checkout & { local: string; sub?: string })[]) {
       if (c.sub !== undefined && c.sub !== "." && !safeRelative(c.sub)) throw new Error("invalid checkout subdirectory");
-      pathMap[c.local] = join(await checkout(run.id, c), c.sub ?? ".");
+      pathMap[c.local] = join(await checkout(run.id, c, claim.slot), c.sub ?? ".");
     }
     return await publishMirror(run, stepId, step, dir, socketDir, pathMap, input);
   } catch (e) {
     // A slot this call claimed goes back; one a retained session already held stays with it.
-    if (claim === "new") await releaseSlot(owner);
+    if (claim.kind === "new") await releaseSlot(owner);
     throw e;
   }
 }
@@ -495,6 +526,13 @@ export async function gc(input: any) {
     });
   }
   for (const trash of doomed) await emptyTrash(trash);
+  // Changes saved when a reused workspace was cleared, past the same cutoff.
+  const spaces = join(dataHome(), "workspaces");
+  for (const repo of existsSync(spaces) ? readdirSync(spaces) : [])
+    for (const f of readdirSync(join(spaces, repo)).filter(f => /^\d+\.leftover-.*\.patch$/.test(f))) {
+      const p = join(spaces, repo, f);
+      if (Date.now() - statSync(p).mtimeMs >= days * 86400_000) rmSync(p, { force: true });
+    }
   return { removed, mirrors };
 }
 export async function serve(op: string, version: string, cli: string[]): Promise<void> {

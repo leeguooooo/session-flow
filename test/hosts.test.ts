@@ -680,3 +680,20 @@ test("claiming a slot the owner already holds renews its time", async () => {
   expect(await claimSlot("step:x:a", 1)).toBe("held");
   expect(Date.now() - JSON.parse(readFileSync(f, "utf8")).since).toBeLessThan(10_000);
 });
+
+test("an assignment that cannot be built also gives a first round's host slot back", async () => {
+  const run = setup([{ id: "d", agent: "codex", prompt: "d" }, { id: "r", agent: "codex", prompt: "x", host: "mini", dependsOn: ["d"] }], { mini: host("mini") });
+  // A done dependency whose result file reference is broken: the task cannot be built.
+  Object.assign(run.steps.d, { status: "done", actor: "codex-12345678", result: { status: "done", summary: "d", fullResultFile: "/nope", sha256: "0".repeat(64), bytes: 1 } });
+  const stopped: string[] = [];
+  const rt: SessionRuntime = {
+    async create() { throw new Error("must not create"); }, async exists() { return false; },
+    async stop(_r: Run, id: string) { stopped.push(id); },
+    remoteStep: (r: Run, id: string) => !!r.steps[id].host,
+    async placeAgent(r: Run, st: Step) { r.steps[st.id].host = "mini"; r.steps[st.id].remote = { dir: "/r", cwd: "/r/c" }; return { ok: true as const }; },
+    async sendTask() { throw new Error("must not send"); },
+  };
+  await tick(run, rt, new NoTransport());
+  expect(run.steps.r.status as string).toBe("blocked");
+  expect(stopped).toContain("r");
+});

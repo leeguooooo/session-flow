@@ -275,11 +275,22 @@ export async function prepare(input: any) {
   const run = input?.run as Run, stepId = input?.stepId as string;
   if (!run || !RUN.test(run.id) || !STEP.test(stepId)) throw new Error("invalid prepare request");
   const dir = join(dataHome(), "runs", run.id);
+  const preparing = join(dir, "preparing", randomUUID());
+  await withLock(() => {
+    if (existsSync(join(dir, "run.json"))) mirrorRun(run.id);
+    mkdirSync(dirname(preparing), { recursive: true, mode: 0o700 });
+    // Retained after a crash: an unfinished checkout must not be collected.
+    writeFileSync(preparing, "", { mode: 0o600 });
+  });
+  try { return await prepareMirror(input); }
+  finally { await withLock(() => { rmSync(preparing, { force: true }); }); }
+}
+async function prepareMirror(input: any) {
+  const run = input.run as Run, stepId = input.stepId as string;
+  const dir = join(dataHome(), "runs", run.id);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const socketDir = join(process.env.TMPDIR ?? "/tmp", `sf-${run.id.slice(0, 12)}`);
   mkdirSync(socketDir, { recursive: true, mode: 0o700 });
-  const existing = existsSync(join(dir, "run.json")) ? loadRun(run.id) : undefined;
-  if (existing && !existing.mirror) throw new Error("a run with this id is driven on this host; refusing to mirror over it");
   const step = run.workflow.steps.find(s => s.id === stepId);
   if (!step) throw new Error("step missing from mirror");
   const root = sessionRoot(run.workflow.steps, step);
@@ -290,14 +301,17 @@ export async function prepare(input: any) {
     if (c.sub !== undefined && c.sub !== "." && !safeRelative(c.sub)) throw new Error("invalid checkout subdirectory");
     pathMap[c.local] = join(await checkout(run.id, c), c.sub ?? ".");
   }
-  const mirror: Run = { ...existing, ...run, dir, socket: join(socketDir, "tmux.sock"), mirror: { driver: String(input.driver ?? "") },
-    steps: { ...(existing?.steps ?? {}), ...run.steps } };
-  mirror.workflow = { ...run.workflow, steps: run.workflow.steps.map(s => {
-    const prev = existing?.workflow.steps.find(x => x.id === s.id);
-    return s.id === stepId ? { ...s, cwd: pathMap[s.cwd] ?? s.cwd } : prev ?? s;
-  }) };
-  saveRun(mirror);
-  return { state: "ready", dir, cwd: pathMap[step.cwd] ?? step.cwd, pathMap };
+  return withLock(() => {
+    const existing = existsSync(join(dir, "run.json")) ? mirrorRun(run.id) : undefined;
+    const mirror: Run = { ...existing, ...run, dir, socket: join(socketDir, "tmux.sock"), mirror: { driver: String(input.driver ?? "") },
+      steps: { ...(existing?.steps ?? {}), ...run.steps } };
+    mirror.workflow = { ...run.workflow, steps: run.workflow.steps.map(s => {
+      const prev = existing?.workflow.steps.find(x => x.id === s.id);
+      return s.id === stepId ? { ...s, cwd: pathMap[s.cwd] ?? s.cwd } : prev ?? s;
+    }) };
+    saveRun(mirror);
+    return { state: "ready", dir, cwd: pathMap[step.cwd] ?? step.cwd, pathMap };
+  });
 }
 export function updateStep(input: any) {
   const run = mirrorRun(input?.runId), id = input?.stepId;
@@ -341,6 +355,10 @@ export async function patchFile(input: any) {
   return { path: out, sha256: createHash("sha256").update(body).digest("hex"), bytes: body.length, base, commit: frozen.commit, tree: frozen.tree };
 }
 export async function rt(input: any, cli: string[]) {
+  if (input.action === "create" || input.action === "continue") return withLock(() => runtimeAction(input, cli));
+  return runtimeAction(input, cli);
+}
+async function runtimeAction(input: any, cli: string[]) {
   const run = mirrorRun(input?.runId), id = input?.stepId as string;
   if (!run.steps[id]) throw new Error("unknown step");
   const runtime = new TmuxRuntime(cli), step = run.workflow.steps.find(s => s.id === id)!;
@@ -404,22 +422,35 @@ export async function gc(input: any) {
   }
   const runs = join(dataHome(), "runs");
   for (const id of existsSync(runs) ? readdirSync(runs) : []) {
-    const dir = join(runs, id), file = join(dir, "run.json");
-    if (!RUN.test(id) || !lstatSync(dir).isDirectory()) continue;
-    const run = readJSON(file);
-    if (!run || !Object.hasOwn(run, "mirror") || Date.now() - statSync(file).mtimeMs < days * 86400_000) continue;
-    // Only this mirror's private socket; either tmux answer can prove a worker is live.
-    if (typeof run.socket !== "string" || !run.socket) continue;
-    if (existsSync(run.socket)) {
-      const has = await command(["tmux", "-S", run.socket, "has-session"]);
-      if (has.code === 0) continue;
-      const list = await command(["tmux", "-S", run.socket, "list-sessions"]);
-      if (list.stdout.trim()) continue;
-    }
-    await withLock(() => { for (const s of slotOwners()) if (s.owner.startsWith(`step:${id}:`)) releaseLocked(s.owner); });
-    await removeCheckouts(id);
-    rmSync(dir, { recursive: true, force: true });
-    mirrors.push(id);
+    if (!RUN.test(id)) continue;
+    await withLock(async () => {
+      const dir = join(runs, id), file = join(dir, "run.json");
+      let run: Run;
+      try {
+        run = loadRun(id);
+        const preparing = join(dir, "preparing");
+        if (existsSync(preparing) && readdirSync(preparing).length) return;
+        if (!run.mirror || Date.now() - statSync(file).mtimeMs < days * 86400_000) return;
+        // Only this mirror's private socket; either tmux answer can prove a worker is live.
+        let socketExists = true;
+        try { lstatSync(run.socket); } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "ENOENT") return;
+          socketExists = false;
+        }
+        if (socketExists) {
+          const absent = (r: Awaited<ReturnType<typeof command>>) => r.code === 1 && !r.stdout.trim()
+            && /no server running|no sessions|error connecting to .*\((No such file or directory|Connection refused)\)/.test(r.stderr);
+          const has = await command(["tmux", "-S", run.socket, "has-session"]);
+          if (!absent(has)) return;
+          const list = await command(["tmux", "-S", run.socket, "list-sessions"]);
+          if (!absent(list)) return;
+        }
+      } catch { return; } // Invalid records and inconclusive probes are kept.
+      for (const s of slotOwners()) if (s.owner.startsWith(`step:${id}:`)) releaseLocked(s.owner);
+      await removeCheckouts(id);
+      rmSync(dir, { recursive: true, force: true });
+      mirrors.push(id);
+    });
   }
   return { removed, mirrors };
 }

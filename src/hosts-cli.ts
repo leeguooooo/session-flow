@@ -58,6 +58,10 @@ A step runs on a host with "host": "<name>" (or a list, or "any"); "agent": "com
 "command": [argv] runs a build or test there. Hosts need non-interactive ssh (BatchMode) from here.
 Defaults: bin ${DEFAULTS.bin}, slots ${DEFAULTS.slots}, max-load ${DEFAULTS.maxLoad} per core, min-free-gb ${DEFAULTS.minFreeGB}.`;
 
+export function gcSummary(name: string, result: { removed: string[]; mirrors: string[] }): string {
+  return `${name}: removed ${result.removed.length} job(s), ${result.mirrors.length} mirror run(s)`;
+}
+
 export async function hostsCommand(args: string[], _router: HostRouter): Promise<number> {
   const [sub, ...rest] = args;
   const json = rest.includes("--json"), list = rest.filter(a => a !== "--json");
@@ -114,7 +118,7 @@ export async function hostsCommand(args: string[], _router: HostRouter): Promise
     let bad = 0;
     for (const n of list.length ? list : Object.keys(hosts)) {
       if (!hosts[n]) throw new Error(`unknown host ${n}`);
-      try { const r = await new SshLink(n, hosts[n]).call<{ removed: string[]; mirrors: string[] }>("gc", { days }, 600_000); console.log(`${n}: removed ${r.removed.length} job(s), ${r.mirrors.length} mirror run(s)`); }
+      try { const r = await new SshLink(n, hosts[n]).call<{ removed: string[]; mirrors: string[] }>("gc", { days }, 600_000); console.log(gcSummary(n, r)); }
       catch (e) { bad++; console.log(`${n}: ${(e as Error).message}`); }
     }
     return bad ? 1 : 0;

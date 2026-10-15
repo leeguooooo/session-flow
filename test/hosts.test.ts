@@ -9,7 +9,7 @@ import { tick, reconcile } from "../src/engine";
 import { HostRouter } from "../src/hostrun";
 import { TmuxRuntime } from "../src/runtime";
 import { SshLink, parseHost, candidates, unfit } from "../src/hosts";
-import { freezeHosts } from "../src/hosts-cli";
+import { freezeHosts, gcSummary } from "../src/hosts-cli";
 import { resolveResult } from "../src/results";
 import { eventProof } from "../src/protocol";
 import type { Message, Run, Transport, HostConfig } from "../src/types";
@@ -311,6 +311,16 @@ test("a lost start answer after gc is never started again: the tombstone makes i
   expect(readFileSync(join(base, "host-mini", "count"), "utf8")).toBe("x\n");
 }, 60_000);
 
+function gcRun(id: string, mirror = true): Run {
+  const dir = join(process.env.SFLOW_HOME!, "runs", id), socketDir = join(base, `sf-${id.slice(0, 12)}`);
+  mkdirSync(dir, { recursive: true }); mkdirSync(socketDir, { recursive: true, mode: 0o700 });
+  const workflow = parseWorkflow({ version: 1, name: "gc", steps: [{ id: "a", agent: "codex", cwd: project }] }, base);
+  const run: Run = { version: 2, id, dir, socket: join(socketDir, "tmux.sock"), channel: `sflow-${id}`,
+    workflow, createdAt: Date.now(), status: "running", steps: { a: { status: "pending", token: "synthetic", session: "sf-a" } },
+    ...(mirror ? { mirror: { driver: "other" } } : {}) };
+  saveRun(run); return run;
+}
+
 test("gc removes old mirrors and their worktrees and releases only their slots", async () => {
   process.env.SFLOW_HOME = join(base, "solo");
   const home = process.env.SFLOW_HOME, id = "00000000-0000-0000-0000-000000000001";
@@ -321,7 +331,7 @@ test("gc removes old mirrors and their worktrees and releases only their slots",
   const realCheckout = realpathSync(checkout);
   writeFileSync(join(checkout, "tracked.txt"), "left by worker\n");
   const file = join(dir, "run.json"), old = new Date(Date.now() - 8 * 86400_000);
-  writeFileSync(file, JSON.stringify({ mirror: { driver: "other" }, socket: join(dir, "missing.sock") }));
+  gcRun(id);
   utimesSync(file, old, old);
   expect(await claimSlot(`step:${id}:a`, 3)).toBe(true);
   expect(await claimSlot(`step:${id}:b`, 3)).toBe(true);
@@ -340,13 +350,56 @@ test("gc keeps fresh mirrors and old runs driven on this host", async () => {
   for (const id of [fresh, local]) {
     const dir = join(process.env.SFLOW_HOME, "runs", id); mkdirSync(dir, { recursive: true });
     const file = join(dir, "run.json");
-    writeFileSync(file, JSON.stringify({ socket: join(dir, "missing.sock"), ...(id === fresh ? { mirror: { driver: "other" } } : {}) }));
+    gcRun(id, id === fresh);
     if (id === local) { const old = new Date(Date.now() - 8 * 86400_000); utimesSync(file, old, old); }
     expect(await claimSlot(`step:${id}:a`, 2)).toBe(true);
   }
   expect(await gc({ days: 7 })).toEqual({ removed: [], mirrors: [] });
   for (const id of [fresh, local]) expect(existsSync(join(process.env.SFLOW_HOME, "runs", id))).toBe(true);
   expect(readdirSync(join(process.env.SFLOW_HOME, "slots"))).toHaveLength(2);
+});
+
+test("gc keeps an old mirror with a real live tmux worker", async () => {
+  process.env.SFLOW_HOME = join(base, "solo");
+  const run = gcRun("00000000-0000-0000-0000-000000000004");
+  const file = join(run.dir, "run.json"), old = new Date(Date.now() - 8 * 86400_000);
+  utimesSync(file, old, old);
+  expect(await claimSlot(`step:${run.id}:a`, 1)).toBe(true);
+  try {
+    const started = spawnSync("tmux", ["-S", run.socket, "new-session", "-d", "-s", "x", "sleep", "30"], { encoding: "utf8" });
+    expect(started.status).toBe(0);
+    expect(await gc({ days: 7 })).toEqual({ removed: [], mirrors: [] });
+    expect(existsSync(file)).toBe(true);
+    expect(readdirSync(join(process.env.SFLOW_HOME, "slots"))).toHaveLength(1);
+  } finally { spawnSync("tmux", ["-S", run.socket, "kill-server"]); }
+});
+
+test("gc keeps corrupt but parseable mirror records", async () => {
+  process.env.SFLOW_HOME = join(base, "solo");
+  const run = gcRun("00000000-0000-0000-0000-000000000005");
+  const file = join(run.dir, "run.json"), old = new Date(Date.now() - 8 * 86400_000);
+  writeFileSync(file, JSON.stringify({ ...run, socket: join(run.dir, "missing.sock") }));
+  utimesSync(file, old, old);
+  expect(await claimSlot(`step:${run.id}:a`, 1)).toBe(true);
+  expect(await gc({ days: 7 })).toEqual({ removed: [], mirrors: [] });
+  expect(existsSync(file)).toBe(true);
+  expect(readdirSync(join(process.env.SFLOW_HOME, "slots"))).toHaveLength(1);
+});
+
+test("hosts gc summary includes job and mirror counts", () => {
+  expect(gcSummary("mini", { removed: ["job1", "job2"], mirrors: ["mirror1"] }))
+    .toBe("mini: removed 2 job(s), 1 mirror run(s)");
+});
+
+test("gc keeps a mirror while checkout preparation is in progress", async () => {
+  process.env.SFLOW_HOME = join(base, "solo");
+  const run = gcRun("00000000-0000-0000-0000-000000000006");
+  mkdirSync(join(run.dir, "preparing"));
+  writeFileSync(join(run.dir, "preparing", "synthetic-operation"), "");
+  expect(await claimSlot(`step:${run.id}:a`, 1)).toBe(true);
+  expect(await gc({ days: 0 })).toEqual({ removed: [], mirrors: [] });
+  expect(existsSync(join(run.dir, "run.json"))).toBe(true);
+  expect(readdirSync(join(process.env.SFLOW_HOME, "slots"))).toHaveLength(1);
 });
 
 test("a slot whose runner died but whose command group lives is not reclaimed", async () => {

@@ -61,13 +61,13 @@ export interface StepState {
   // The host this step was placed on (recorded before the host is asked to do anything).
   host?: string;
   // Paths on that host: its run directory, and the working directory of this step.
-  remote?: { dir: string; cwd?: string; base?: string; materialized?: boolean; pathMap?: Record<string, string> };
+  remote?: { dir: string; cwd?: string; base?: string; materialized?: boolean; localTree?: string; pathMap?: Record<string, string> };
   job?: JobState;
 }
 export interface JobState {
   id: string;
   phase: "placing" | "sending" | "starting" | "running" | "exited" | "collected";
-  commit?: string; tree?: string; head?: string; repo?: string; source?: string;
+  commit?: string; tree?: string; head?: string; repo?: string; source?: string; cwd?: string;
   receipt?: Record<string, unknown>;
 }
 export interface HostConfig {

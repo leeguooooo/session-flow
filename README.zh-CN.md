@@ -173,11 +173,12 @@ sflow hosts check                     # sflow 版本、工具、负载、剩余�
   "workspace": "implement", "command": ["bun", "test"], "artifacts": ["coverage/summary.txt"] }
 ```
 
-- 远端拿到的是文件的冻结副本：已跟踪和未跟踪、未被忽略的文件，包括未提交的修改。被忽略的文件和 submodule 不发送，Git LFS 文件只到指针。你仓库的 HEAD、index 和对象库都不会被写入，也不会推到 `origin`。
+- 远端拿到的是文件的冻结副本：已跟踪和未跟踪、未被忽略的文件，包括未提交的修改。被忽略的文件不发送；不支持 submodule 和 Git LFS。你仓库的 HEAD、index 和对象库都不会被写入，也不会推到 `origin`。
 - 只有每核负载低于 `--max-load`（默认 0.8）、剩余磁盘高于 `--min-free-gb`（默认 5）时才会用这台机器。`--slots`（默认 2）限制那台机器上同时跑几个步骤，所有往这台机器派任务的人共用。
 - 带 host 的步骤不会退回本机跑。任务开始后主机失联，步骤记为 `uncertain`，不会重跑，也不会换机器。
 - agent 步骤也可以带 host。原生会话跑在那台机器上（那边要装好并登录对应的 CLI，还要有 tmux 和 ocs）；`status`、`logs`、`answer`、`attach` 用法不变。写入步骤的改动会以未提交修改的形式回到本机的 worktree，和本地写入步骤一样。`inPlace` 步骤只能在本机；`workspace` 和 `reuseSession` 链必须在同一台机器上。
 - run 启动时会把用到的主机配置复制进 run，之后改 `hosts.json` 不影响正在跑或 resume 的 run。
+- workflow 的 `concurrency` 同时限制 agent 会话和运行中的 command 步骤，两者合计不超过它。
 - `sflow hosts gc [--days 7]` 清理主机上已结束的 command 任务。
 
 GUI 操作、截图、用你钥匙串签名，以及任何用到本机屏幕或浏览器 profile 的事，都不能给 host。

@@ -80,6 +80,15 @@ export function reconcile(run: Run, rows: Message[]) {
     }
   }
 }
+// concurrency counts native sessions (one per reuse chain, live or retained) and running command jobs together.
+function commandsRunning(run: Run): number {
+  return run.workflow.steps.filter(x => x.agent === "command" && (active.has(run.steps[x.id].status) || (run.steps[x.id].status === "uncertain" && run.steps[x.id].job))).length;
+}
+function live(run: Run): number {
+  const sessions = new Set(run.workflow.steps.filter(x => x.agent !== "command" &&
+    (active.has(run.steps[x.id].status) || ["active", "retained"].includes(run.steps[x.id].lifecycle ?? ""))).map(x => sessionRoot(run.workflow.steps, x)));
+  return sessions.size + commandsRunning(run);
+}
 export async function tick(run: Run, runtime: SessionRuntime, transport: Transport) {
   if (existsSync(join(run.dir, "cancel.request"))) {
     for (const step of run.workflow.steps) {
@@ -166,8 +175,7 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
       if (!decision.run) { s.status = "skipped"; s.finishedAt = Date.now(); saveRun(run); continue; }
     }
     if (step.agent === "command") {
-      const busy = run.workflow.steps.filter(x => x.agent === "command" && active.has(run.steps[x.id].status)).length;
-      if (busy >= run.workflow.concurrency) continue;
+      if (live(run) >= run.workflow.concurrency) continue;
       if (!runtime.startCommand) { s.status = "blocked"; s.error = "this runtime cannot run command steps"; saveRun(run); continue; }
       s.status = "launching"; s.startedAt ??= Date.now(); saveRun(run);
       let r: Awaited<ReturnType<NonNullable<SessionRuntime["startCommand"]>>>;
@@ -200,7 +208,7 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
         if (!busy) for (const m of members.filter(m => finished(run.steps[m.id].status))) run.steps[m.id].lifecycle = "retained";
       }
     }
-    if (!step.reuseSession && occupied >= run.workflow.concurrency) {
+    if (!step.reuseSession && occupied + commandsRunning(run) >= run.workflow.concurrency) {
       if (!Object.values(run.steps).some(s => active.has(s.status))) {
         s.status = "blocked"; s.error = "retained/blocked workers fill concurrency slots; inspect them and use higher concurrency in a new workflow"; saveRun(run);
       }
@@ -209,9 +217,7 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
     if (step.reuseSession && run.steps[step.reuseSession].status !== "done") {
       s.status = "blocked"; s.error = "reuseSession ancestor did not report done; no continuation"; saveRun(run); continue;
     }
-    if (step.reuseSession && (!runtime.continue || !await runtime.exists(run, step.id))) {
-      s.status = "uncertain"; s.uncertainty = "worker"; s.error = "retained worker unavailable; no automatic recreation"; saveRun(run); continue;
-    }
+    // Placement first: a continuation inherits its chain's host, where its retained worker lives.
     if (step.host && !s.remote) {
       if (!runtime.placeAgent) { s.status = "blocked"; s.error = "this runtime cannot place steps on hosts"; saveRun(run); continue; }
       let r: Awaited<ReturnType<NonNullable<SessionRuntime["placeAgent"]>>>;
@@ -219,6 +225,9 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
       if ("wait" in r) { s.error = `waiting for a host: ${r.wait}`; saveRun(run); continue; }
       if ("error" in r) { s.status = "blocked"; s.error = r.error; saveRun(run); continue; }
       delete s.error; saveRun(run);
+    }
+    if (step.reuseSession && (!runtime.continue || !await runtime.exists(run, step.id))) {
+      s.status = "uncertain"; s.uncertainty = "worker"; s.error = "retained worker unavailable; no automatic recreation"; saveRun(run); continue;
     }
     try { await beginObservation(run, step); } catch (e) {
       s.status = "blocked"; s.error = `workspace observation failed: ${String(e)}`; saveRun(run); continue;

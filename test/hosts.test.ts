@@ -287,3 +287,142 @@ test("reports for a remote step count only from that host's channel; results are
   // A file outside the mirrored run is not served.
   await expect(link.fetch("file", { runId: run.id, path: "/etc/hosts" }, join(base, "x"))).rejects.toThrow("outside the run");
 }, 60_000);
+
+// ---- failure cases from review ----
+import { claimSlot, jobCancel, jobExec, jobStatus } from "../src/remote";
+import type { SessionRuntime, Step } from "../src/types";
+
+test("a lost start answer after gc is never started again: the tombstone makes it uncertain", async () => {
+  const run = setup([{ id: "a", agent: "command", host: "mini", command: ["sh", "-c", "echo x >> \"$HOME/count\""] }], { mini: host("mini") });
+  const rt = router(), tr = new NoTransport();
+  await until(run, rt, tr, () => run.status !== "running");
+  expect(readFileSync(join(base, "host-mini", "count"), "utf8")).toBe("x\n");
+  await new SshLink("mini", run.hosts!.mini).call("gc", { days: 0 });
+  // The driver's record says the start was sent but never answered.
+  Object.assign(run.steps.a, { status: "launching", result: undefined }); run.steps.a.job!.phase = "starting"; run.status = "running"; saveRun(run);
+  await tick(run, rt, tr);
+  expect(run.steps.a.status as string).toBe("uncertain");
+  expect(run.steps.a.error).toContain("never started again");
+  expect(readFileSync(join(base, "host-mini", "count"), "utf8")).toBe("x\n");
+}, 60_000);
+
+test("a slot whose runner died but whose command group lives is not reclaimed", async () => {
+  process.env.SFLOW_HOME = join(base, "solo");
+  const id = "00000000-0000-0000-0000-000000000000-a", dir = join(base, "solo", "jobs", id);
+  mkdirSync(dir, { recursive: true });
+  const sleeper = Bun.spawn(["sh", "-c", "sleep 20"], { stdio: ["ignore", "ignore", "ignore"], detached: true } as any);
+  writeFileSync(join(dir, "runner.json"), JSON.stringify({ pid: 999_999 }));
+  writeFileSync(join(dir, "started.json"), JSON.stringify({ pid: sleeper.pid, pgid: sleeper.pid }));
+  expect(await claimSlot(`job:${id}`, 1)).toBe(true);
+  try {
+    expect(await claimSlot("job:other", 1)).toBe(false);
+    expect((jobStatus({ jobId: id }) as any).state).toBe("running");
+  } finally { process.kill(-sleeper.pid!, "SIGKILL"); }
+  await Bun.sleep(100);
+  expect(await claimSlot("job:other", 1)).toBe(true);
+}, 30_000);
+
+test("concurrent claimers on one host never share a slot", async () => {
+  const home = join(base, "race");
+  const script = join(base, "claim.ts");
+  writeFileSync(script, `import { claimSlot } from ${JSON.stringify(resolve(import.meta.dir, "../src/remote.ts"))};\nconsole.log(await claimSlot(process.argv[2], 1));\n`);
+  const procs = Array.from({ length: 8 }, (_, i) => Bun.spawn([process.execPath, script, `step:r:${i}`], { env: { ...process.env, SFLOW_HOME: home }, stdout: "pipe" }));
+  const outs = await Promise.all(procs.map(p => new Response(p.stdout).text()));
+  expect(outs.filter(o => o.trim() === "true").length).toBe(1);
+}, 30_000);
+
+test("a cancel recorded before the start keeps the command from ever running", async () => {
+  process.env.SFLOW_HOME = join(base, "solo");
+  const id = "00000000-0000-0000-0000-000000000000-c", dir = join(base, "solo", "jobs", id);
+  mkdirSync(dir, { recursive: true });
+  const marker = join(base, "ran");
+  writeFileSync(join(dir, "spec.json"), JSON.stringify({ jobId: id, repo: "0123456789abcdef", commit: "x", tree: "y", argv: ["touch", marker], artifacts: [], slots: 1 }));
+  expect((await jobCancel({ jobId: id })).state).toBe("claimed");
+  await jobExec(id);
+  expect(existsSync(marker)).toBe(false);
+  expect(JSON.parse(readFileSync(join(dir, "exit.json"), "utf8")).error).toContain("cancelled before it started");
+});
+
+test("a command runs in its cwd inside the repository, not at the root", async () => {
+  mkdirSync(join(project, "sub")); writeFileSync(join(project, "sub", "marker"), "in sub\n");
+  const run = setup([{ id: "a", agent: "command", host: "mini", cwd: join(project, "sub"), command: ["cat", "marker"], artifacts: ["marker"] }], { mini: host("mini") });
+  const rt = router(), tr = new NoTransport();
+  await until(run, rt, tr, () => run.status !== "running");
+  expect(run.steps.a.status).toBe("done");
+  expect(readFileSync(join(run.dir, "a", "log.txt"), "utf8")).toBe("in sub\n");
+}, 60_000);
+
+test("expect gates a command step like an agent's report", async () => {
+  const run = setup([{ id: "a", agent: "command", command: ["true"], expect: { "details.exitCode": 99 } }], {});
+  const rt = router(), tr = new NoTransport();
+  await until(run, rt, tr, () => run.status !== "running");
+  expect(run.steps.a.status).toBe("blocked");
+  expect(run.steps.a.error).toContain("details.exitCode");
+}, 60_000);
+
+test("missing evidence (no log, no artifact list, a different job record) blocks a zero exit", async () => {
+  const run = setup([{ id: "a", agent: "command", host: "mini", command: ["true"], artifacts: ["required.bin"] }], { mini: host("mini") });
+  const rt = router(), tr = new NoTransport();
+  const s = run.steps.a;
+  Object.assign(s, { status: "running", host: "mini", startedAt: Date.now(), job: { id: `${run.id}-a`, phase: "running", commit: "c1", tree: "t1", cwd: "." } });
+  const fake = { name: "mini", gitUrl: () => "", gitEnv: () => ({}),
+    call: async (op: string) => op === "job-status" ? { state: "exited", exit: { code: 0, finishedAt: Date.now() }, spec: { commit: "other", tree: "t1", argv: ["true"], artifacts: ["required.bin"] } } : {},
+    fetch: async () => { throw new Error("connection reset"); } };
+  (rt as any).links.set(`${run.id}:mini`, fake);
+  await rt.pollCommand(run, run.workflow.steps[0]);
+  expect(s.status).toBe("blocked");
+  const r = resolveResult(run, "a", s.result!) as any;
+  expect(r.details.evidenceProblems.join(" ")).toContain("does not match");
+  expect(r.details.evidenceProblems.join(" ")).toContain("log unavailable");
+  expect(r.details.evidenceProblems.join(" ")).toContain("no artifact list");
+});
+
+test("concurrency counts agent sessions and command jobs together", async () => {
+  const run = setup([{ id: "agent", agent: "codex", prompt: "x" }, { id: "cmd", agent: "command", command: ["true"] }], {}, 1);
+  const order: string[] = [];
+  const rt: SessionRuntime = {
+    async create(r: Run, st: Step) { order.push(st.id); r.steps[st.id].cwd = st.cwd; },
+    async exists(r: Run, id: string) { return order.includes(id) && run.workflow.steps.find(x => x.id === id)!.agent !== "command"; },
+    async stop() {},
+    async startCommand(r: Run, st: Step) { order.push(st.id); r.steps[st.id].status = "running"; r.steps[st.id].job = { id: "j", phase: "running" }; return { ok: true as const }; },
+    async pollCommand() {},
+  };
+  await tick(run, rt, new NoTransport());
+  expect(order).toEqual(["agent"]);
+  await tick(run, rt, new NoTransport());
+  expect(order).toEqual(["agent"]);
+});
+
+test("a continuation round takes its chain's host before looking for the retained worker there", async () => {
+  const run = setup([{ id: "a", agent: "codex", prompt: "x", host: "mini" }, { id: "b", agent: "codex", prompt: "y", host: "mini", reuseSession: "a", dependsOn: ["a"] }], { mini: host("mini") });
+  Object.assign(run.steps.a, { status: "done", host: "mini", remote: { dir: "/r" }, actor: "codex-12345678", result: { status: "done", summary: "ok" }, lifecycle: "retained" });
+  const calls: string[] = [];
+  const rt: SessionRuntime = {
+    async create() { calls.push("create"); },
+    async continue() { calls.push("continue"); },
+    async exists(r: Run, id: string) { calls.push(`exists:${id}:${r.steps[id].host ?? "local"}`); return r.steps[id].host === "mini"; },
+    async stop() {},
+    remoteStep: (r: Run, id: string) => !!r.steps[id].host,
+    async placeAgent(r: Run, st: Step) { calls.push("place"); r.steps[st.id].host = r.steps.a.host; r.steps[st.id].remote = { dir: "/r", cwd: "/r/c" }; return { ok: true as const }; },
+    async sendTask() { calls.push("send"); },
+  };
+  await tick(run, rt, new NoTransport());
+  expect(calls.indexOf("place")).toBeLessThan(calls.indexOf("exists:b:mini"));
+  expect(calls).not.toContain("exists:b:local");
+  expect(calls).toContain("continue");
+  expect(calls).not.toContain("create");
+});
+
+test("bringing a remote worktree back refuses to overwrite local edits made since", async () => {
+  const run = setup([{ id: "impl", agent: "codex", prompt: "x", policy: "workspace-write", worktree: true, host: "mini" }], { mini: host("mini") });
+  const rt = router();
+  expect(await rt.placeAgent(run, run.workflow.steps[0])).toEqual({ ok: true });
+  writeFileSync(join(run.steps.impl.remote!.cwd!, "a.txt"), "one\n");
+  Object.assign(run.steps.impl, { status: "done", result: { status: "done", summary: "ok" } });
+  await rt.materialize(run, run.workflow.steps[0]);
+  const wt = join(run.dir, "impl", "worktree");
+  writeFileSync(join(wt, "a.txt"), "edited by a person\n");
+  run.steps.impl.remote!.materialized = false;
+  await expect(rt.materialize(run, run.workflow.steps[0])).rejects.toThrow("changed since sflow last wrote it");
+  expect(readFileSync(join(wt, "a.txt"), "utf8")).toBe("edited by a person\n");
+}, 60_000);

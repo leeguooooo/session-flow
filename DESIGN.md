@@ -160,7 +160,7 @@ object directory in the run (alternates point at the project's objects).
   reader: tracked plus untracked, non-ignored files of the checkout or of the
   worktree they read, frozen into a commit with a temporary index, the same set
   `workspace.ts` snapshots. Submodules are refused; ignored files are not sent;
-  Git LFS files arrive as their pointers.
+  Git LFS is not supported.
 - Write steps start from HEAD, as a local write step's new worktree does. When a
   remote write step reports, the driver asks the host for a binary patch of the
   remote worktree against that HEAD (untracked files included), verifies its
@@ -220,3 +220,6 @@ SHA-256 checked before reconciliation. For a continuation round the driver
 updates the mirror's previous-round state first. status, logs, answer, attach,
 stop and cancel go through the same remote operations. Remote sessions count
 toward the workflow's concurrency and hold a host slot until they are closed.
+A step placed on a host that never runs (the run stays blocked) keeps that slot
+until `stop` or the run's cleanup; `sflow hosts check` lists slot owners. Running
+command jobs (and uncertain ones) count toward `concurrency` together with sessions.

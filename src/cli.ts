@@ -226,8 +226,11 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
         if (existsSync(log)) { console.log(readFileSync(log, "utf8")); return; }
         throw new Error(`${rest[0]} is a command on ${run.steps[rest[0]].host ?? "no host yet"}; its log arrives when the job exits (status: ${run.steps[rest[0]].status})`);
       }
-      if (runtime.remoteStep(run, rest[0])) { console.log(await runtime.screen(run, rest[0])); return; }
       const archive = resolve(run.dir, rest[0], "terminal.txt");
+      if (runtime.remoteStep(run, rest[0])) {
+        if (!await runtime.exists(run, rest[0]) && existsSync(archive)) { console.log(readFileSync(archive, "utf8")); return; }
+        console.log(await runtime.screen(run, rest[0])); return;
+      }
       if (!await runtime.exists(run, rest[0]) && existsSync(archive)) { console.log(readFileSync(archive, "utf8")); return; }
       console.log(await checked([runtime.binary, "-S", run.socket, "capture-pane", "-p", "-t", `${run.steps[rest[0]].session}:0.0`, "-S", "-200"])); return;
     }

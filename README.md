@@ -199,8 +199,8 @@ artifacts, no agent involved.
 ```
 
 - The host gets a frozen copy of the files: tracked and untracked, non-ignored
-  ones, including uncommitted edits. Ignored files and submodules are not sent;
-  Git LFS files arrive as pointers. Your repository's HEAD, index and object store
+  ones, including uncommitted edits. Ignored files are not sent;
+  submodules and Git LFS are not supported. Your repository's HEAD, index and object store
   are never written; sflow never pushes to `origin`.
 - A host is used only while its load per core is under `--max-load` (default
   0.8) and its free disk over `--min-free-gb` (default 5). `--slots` (default 2)
@@ -215,6 +215,7 @@ artifacts, no agent involved.
   `inPlace` steps stay local; `workspace` and `reuseSession` chains stay on one host.
 - The hosts a workflow names are copied into the run when it starts, so editing
   `hosts.json` does not change a running or resumed run.
+- Workflow `concurrency` caps agent sessions and running command steps together.
 - `sflow hosts gc [--days 7]` deletes finished command jobs on the hosts.
 
 GUI work, screenshots, signing with your keychain, or anything using this

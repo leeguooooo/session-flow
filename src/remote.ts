@@ -35,26 +35,30 @@ function alive(pid: unknown): boolean {
 }
 
 // One lock per host serialises every journal and slot decision: claims, starts, cancels, releases.
-// A lock left by a dead process (same machine, so the pid is meaningful) is broken.
+// flock(2) on a file that is never removed: the kernel drops it when its holder exits, so there
+// is no stale-lock reclaim (and no reclaim race). Our fds are close-on-exec, so spawned jobs do not
+// inherit it.
+let libc: { flock(fd: number, op: number): number } | undefined;
+function flock(fd: number, op: number): number {
+  if (!libc) {
+    const { dlopen, FFIType } = require("bun:ffi") as typeof import("bun:ffi");
+    const lib = dlopen(process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6",
+      { flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
+    libc = { flock: (f, o) => lib.symbols.flock(f, o) as number };
+  }
+  return libc.flock(fd, op);
+}
+const LOCK_EX = 2, LOCK_NB = 4, LOCK_UN = 8;
 export async function withLock<T>(fn: () => T | Promise<T>): Promise<T> {
   const dir = join(dataHome(), "locks"); mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const lock = join(dir, "journal"), deadline = Date.now() + 60_000;
-  for (;;) {
-    try { mkdirSync(lock, { mode: 0o700 }); writeFileSync(join(lock, "pid"), String(process.pid), { mode: 0o600 }); break; }
-    catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      const pid = Number(readFileSync(join(lock, "pid"), "utf8").trim() || NaN);
-      let age = 0; try { age = Date.now() - statSync(lock).mtimeMs; } catch { continue; }
-      if ((Number.isInteger(pid) && !alive(pid)) || (!Number.isInteger(pid) && age > 30_000)) {
-        const dead = `${lock}.dead-${randomUUID()}`;
-        try { renameSync(lock, dead); rmSync(dead, { recursive: true, force: true }); } catch {}
-        continue;
-      }
+  const fd = openSync(join(dir, "journal.lock"), "a", 0o600), deadline = Date.now() + 60_000;
+  try {
+    while (flock(fd, LOCK_EX | LOCK_NB) !== 0) {
       if (Date.now() > deadline) throw new Error("the host's sflow journal lock is held too long; try again");
       await Bun.sleep(15);
     }
-  }
-  try { return await fn(); } finally { rmSync(lock, { recursive: true, force: true }); }
+    try { return await fn(); } finally { flock(fd, LOCK_UN); }
+  } finally { closeSync(fd); }
 }
 function groupAlive(pgid: unknown): boolean {
   if (typeof pgid !== "number" || pgid < 2) return false;

@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 import { buildTask, prefixGroup } from "./context";
 import { resolveResult, resultFile } from "./results";
 import { nativeActor, validProof } from "./protocol";
-import type { Run, SessionRuntime, Step, Transport, TaskEvent, Message, WorkerEvent } from "./types";
+import type { Run, SessionRuntime, Step, StepState, Transport, TaskEvent, Message, WorkerEvent } from "./types";
 
 const active = new Set(["dispatching", "launching", "starting", "running"]);
 const terminal = new Set(["done", "failed", "blocked", "uncertain", "cancelled", "skipped"]);
@@ -84,10 +84,35 @@ export function reconcile(run: Run, rows: Message[]) {
 function commandsRunning(run: Run): number {
   return run.workflow.steps.filter(x => x.agent === "command" && (active.has(run.steps[x.id].status) || (run.steps[x.id].status === "uncertain" && run.steps[x.id].job))).length;
 }
-function live(run: Run): number {
-  const sessions = new Set(run.workflow.steps.filter(x => x.agent !== "command" &&
-    (active.has(run.steps[x.id].status) || ["active", "retained"].includes(run.steps[x.id].lifecycle ?? ""))).map(x => sessionRoot(run.workflow.steps, x)));
-  return sessions.size + commandsRunning(run);
+// Live native sessions, one per reuse chain. Sessions no step can use any more are stopped first,
+// so a finished worker never holds a slot that a later agent or command step needs.
+async function occupancy(run: Run, runtime: SessionRuntime): Promise<number> {
+  const groups = new Map<string, Step[]>();
+  for (const member of run.workflow.steps.filter(x => x.agent !== "command")) {
+    const root = sessionRoot(run.workflow.steps, member);
+    groups.set(root, [...(groups.get(root) ?? []), member]);
+  }
+  let occupied = 0;
+  for (const members of groups.values()) {
+    const owner = members.find(m => run.steps[m.id].lifecycle === "active") ?? members[0];
+    const live = await runtime.exists(run, owner.id);
+    const needsLater = members.some(m => run.steps[m.id].status === "pending");
+    const busy = members.some(m => active.has(run.steps[m.id].status) || ["blocked", "uncertain", "failed"].includes(run.steps[m.id].status));
+    if (live && !busy && !needsLater) {
+      await runtime.stop(run, owner.id);
+      for (const m of members) run.steps[m.id].lifecycle = "closed";
+    } else if (live) {
+      occupied++;
+      if (!busy) for (const m of members.filter(m => finished(run.steps[m.id].status))) run.steps[m.id].lifecycle = "retained";
+    }
+  }
+  return occupied;
+}
+// Nothing can free a slot: every one is held by a retained, blocked or uncertain worker or job.
+function stuck(run: Run, s: StepState) {
+  if (Object.values(run.steps).some(x => active.has(x.status))) return false;
+  s.status = "blocked"; s.error = "retained/blocked workers or jobs fill concurrency slots; inspect them and use higher concurrency in a new workflow"; saveRun(run);
+  return true;
 }
 export async function tick(run: Run, runtime: SessionRuntime, transport: Transport) {
   if (existsSync(join(run.dir, "cancel.request"))) {
@@ -175,7 +200,7 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
       if (!decision.run) { s.status = "skipped"; s.finishedAt = Date.now(); saveRun(run); continue; }
     }
     if (step.agent === "command") {
-      if (live(run) >= run.workflow.concurrency) continue;
+      if (await occupancy(run, runtime) + commandsRunning(run) >= run.workflow.concurrency) { stuck(run, s); continue; }
       if (!runtime.startCommand) { s.status = "blocked"; s.error = "this runtime cannot run command steps"; saveRun(run); continue; }
       s.status = "launching"; s.startedAt ??= Date.now(); saveRun(run);
       let r: Awaited<ReturnType<NonNullable<SessionRuntime["startCommand"]>>>;
@@ -189,31 +214,8 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
     // launched. This only enables compatible caching; it never claims a hit.
     if (group && Object.values(run.steps).some(other => other.prefixGroup === group && other.status === "starting" && Date.now() - (other.startedAt ?? 0) < (run.workflow.prefixWarmupMs ?? 0))) continue;
     // Stop only a whole worker group with no active or possible future round.
-    const groups = new Map<string, Step[]>();
-    for (const member of run.workflow.steps) {
-      const root = sessionRoot(run.workflow.steps, member);
-      groups.set(root, [...(groups.get(root) ?? []), member]);
-    }
-    let occupied = 0;
-    for (const members of groups.values()) {
-      const owner = members.find(m => run.steps[m.id].lifecycle === "active") ?? members[0];
-      const live = await runtime.exists(run, owner.id);
-      const needsLater = members.some(m => run.steps[m.id].status === "pending");
-      const busy = members.some(m => active.has(run.steps[m.id].status) || ["blocked", "uncertain", "failed"].includes(run.steps[m.id].status));
-      if (live && !busy && !needsLater) {
-        await runtime.stop(run, owner.id);
-        for (const m of members) run.steps[m.id].lifecycle = "closed";
-      } else if (live) {
-        occupied++;
-        if (!busy) for (const m of members.filter(m => finished(run.steps[m.id].status))) run.steps[m.id].lifecycle = "retained";
-      }
-    }
-    if (!step.reuseSession && occupied + commandsRunning(run) >= run.workflow.concurrency) {
-      if (!Object.values(run.steps).some(s => active.has(s.status))) {
-        s.status = "blocked"; s.error = "retained/blocked workers fill concurrency slots; inspect them and use higher concurrency in a new workflow"; saveRun(run);
-      }
-      continue;
-    }
+    const occupied = await occupancy(run, runtime);
+    if (!step.reuseSession && occupied + commandsRunning(run) >= run.workflow.concurrency) { stuck(run, s); continue; }
     if (step.reuseSession && run.steps[step.reuseSession].status !== "done") {
       s.status = "blocked"; s.error = "reuseSession ancestor did not report done; no continuation"; saveRun(run); continue;
     }

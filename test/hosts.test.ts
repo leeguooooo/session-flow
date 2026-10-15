@@ -426,3 +426,60 @@ test("bringing a remote worktree back refuses to overwrite local edits made sinc
   await expect(rt.materialize(run, run.workflow.steps[0])).rejects.toThrow("changed since sflow last wrote it");
   expect(readFileSync(join(wt, "a.txt"), "utf8")).toBe("edited by a person\n");
 }, 60_000);
+
+test("a finished agent session is closed so a later command step starts (concurrency 1)", async () => {
+  const run = setup([{ id: "a", agent: "codex", prompt: "x" }, { id: "b", agent: "command", command: ["true"], dependsOn: ["a"] }], {}, 1);
+  const live = new Set<string>(), started: string[] = [];
+  const rt: SessionRuntime = {
+    async create(r: Run, st: Step) { live.add(st.id); r.steps[st.id].cwd = st.cwd; },
+    async exists(_r: Run, id: string) { return live.has(id); },
+    async stop(_r: Run, id: string) { live.delete(id); },
+    async startCommand(r: Run, st: Step) { started.push(st.id); r.steps[st.id].status = "running"; r.steps[st.id].job = { id: "j", phase: "running" }; return { ok: true as const }; },
+    async pollCommand() {},
+  };
+  const tr = new NoTransport();
+  await tick(run, rt, tr);
+  expect(live.has("a")).toBe(true);
+  Object.assign(run.steps.a, { status: "done", actor: "codex-12345678", result: { status: "done", summary: "ok" } });
+  for (let i = 0; i < 3 && !started.length; i++) await tick(run, rt, tr);
+  expect(started).toEqual(["b"]);
+  expect(live.has("a")).toBe(false);
+  expect(run.steps.a.lifecycle).toBe("closed");
+});
+
+test("a retained session that fills the only slot blocks a command step instead of leaving it pending", async () => {
+  const run = setup([
+    { id: "a", agent: "codex", prompt: "x" },
+    { id: "b", agent: "command", command: ["true"], dependsOn: ["a"] },
+    { id: "c", agent: "codex", prompt: "y", reuseSession: "a", dependsOn: ["b"] },
+  ], {}, 1);
+  const live = new Set<string>(["a"]);
+  Object.assign(run.steps.a, { status: "done", actor: "codex-12345678", result: { status: "done", summary: "ok" }, lifecycle: "active" });
+  const rt: SessionRuntime = {
+    async create() {}, async exists(_r: Run, id: string) { return live.has(id); }, async stop(_r: Run, id: string) { live.delete(id); },
+    async startCommand() { throw new Error("must not start"); },
+  };
+  await tick(run, rt, new NoTransport());
+  expect(live.has("a")).toBe(true);
+  expect(run.steps.a.lifecycle).toBe("retained");
+  expect(run.steps.b.status).toBe("blocked");
+  expect(run.steps.b.error).toContain("fill concurrency slots");
+});
+
+test("the host lock is mutual exclusion across processes and dies with its holder", async () => {
+  const home = join(base, "lock"), log = join(base, "lock.log");
+  const remote = JSON.stringify(resolve(import.meta.dir, "../src/remote.ts"));
+  // A leftover empty lock directory from an older layout must not matter.
+  mkdirSync(join(home, "locks", "journal"), { recursive: true });
+  const worker = join(base, "crit.ts");
+  writeFileSync(worker, `import { withLock } from ${remote};\nimport { appendFileSync } from "node:fs";\nawait withLock(async () => { appendFileSync(${JSON.stringify(log)}, "in\\n"); await Bun.sleep(40); appendFileSync(${JSON.stringify(log)}, "out\\n"); });\n`);
+  // A holder killed inside the critical section: the kernel releases its lock.
+  const holder = join(base, "hold.ts");
+  writeFileSync(holder, `import { withLock } from ${remote};\nawait withLock(async () => { console.log("held"); await Bun.sleep(60_000); });\n`);
+  const h = Bun.spawn([process.execPath, holder], { env: { ...process.env, SFLOW_HOME: home }, stdout: "pipe" });
+  const reader = h.stdout.getReader(); await reader.read();
+  h.kill("SIGKILL"); await h.exited;
+  const procs = Array.from({ length: 8 }, () => Bun.spawn([process.execPath, worker], { env: { ...process.env, SFLOW_HOME: home } }));
+  expect((await Promise.all(procs.map(p => p.exited))).every(c => c === 0)).toBe(true);
+  expect(readFileSync(log, "utf8")).toBe("in\nout\n".repeat(8));
+}, 60_000);

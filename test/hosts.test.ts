@@ -623,3 +623,34 @@ test("a prepare that fails after claiming a new slot gives the slot back", async
   const slots = join(base, "host-mini", "state", "slots");
   expect(existsSync(slots) ? readdirSync(slots) : []).toEqual([]);
 }, 60_000);
+
+test("evidence behind a symlink out of the step's directory is never sent to a host", async () => {
+  const run = setup([{ id: "x", agent: "codex", prompt: "x" }, { id: "r", agent: "codex", prompt: "r", host: "mini", dependsOn: ["x"] }], { mini: host("mini") });
+  const outside = join(base, "outside"); mkdirSync(outside); writeFileSync(join(outside, "secret"), "do not send\n");
+  mkdirSync(join(run.dir, "x"), { recursive: true }); symlinkSync(outside, join(run.dir, "x", "link"));
+  writeFileSync(join(run.dir, "x", "ok.txt"), "fine\n");
+  Object.assign(run.steps.x, { status: "done", actor: "codex-12345678",
+    result: { status: "done", summary: "x", artifacts: [join(run.dir, "x", "link", "secret"), join(run.dir, "x", "ok.txt")] } });
+  const rt = router();
+  expect(await rt.placeAgent(run, run.workflow.steps[1])).toEqual({ ok: true });
+  const { buildTask } = await import("../src/context");
+  const task = await rt.remoteTask(run, run.workflow.steps[1], buildTask(run, run.workflow.steps[1]));
+  const remoteDir = run.steps.r.remote!.dir;
+  expect(existsSync(join(remoteDir, "x", "link", "secret"))).toBe(false);
+  expect(readFileSync(join(remoteDir, "x", "ok.txt"), "utf8")).toBe("fine\n");
+  expect(task.evidenceNotCopied).toEqual([join(run.dir, "x", "link", "secret")]);
+}, 60_000);
+
+test("a failed prepare for a continuation round never releases the retained worker's slot", async () => {
+  const run = setup([{ id: "a", agent: "codex", prompt: "x", host: "mini" }, { id: "b", agent: "codex", prompt: "y", host: "mini", reuseSession: "a", dependsOn: ["a"] }], { mini: host("mini") });
+  Object.assign(run.steps.a, { status: "done", host: "mini", remote: { dir: "/r", cwd: "/r/c" }, actor: "codex-12345678", result: { status: "done", summary: "ok" } });
+  const rt = router(), calls: string[] = [];
+  (rt as any).links.set(`${run.id}:mini`, { name: "mini", gitUrl: () => "", gitEnv: () => ({}), fetch: async () => {},
+    call: async (op: string) => { calls.push(op); if (op === "prepare") throw new Error("checkout failed"); if (op === "repo") return { path: "/x" }; return {}; } });
+  (rt as any).freezeLocal = async () => ({ root: project, head: "h", commit: "c", tree: "t", repo: "0123456789abcdef" });
+  (rt as any).send = async () => {};
+  const r = await rt.placeAgent(run, run.workflow.steps[1]);
+  expect("error" in r).toBe(true);
+  expect(calls).toContain("prepare");
+  expect(calls).not.toContain("release");
+});

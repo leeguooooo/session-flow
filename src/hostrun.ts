@@ -98,7 +98,10 @@ export class HostRouter implements SessionRuntime {
         reasons.push(`${name} has no free slot`);
       } catch (e) {
         reasons.push((e as Error).message);
-        await this.link(run, name).call("release", { runId: run.id, root: sessionRoot(run.workflow.steps, step) }).catch(() => {});
+        // Only a first round may give its session's slot back; a continuation's slot belongs to the
+        // retained worker it continues.
+        if (sessionRoot(run.workflow.steps, step) === step.id)
+          await this.link(run, name).call("release", { runId: run.id, root: step.id }).catch(() => {});
         if (tries) { s.error = `preparing on ${name} failed: ${(e as Error).message}`; return { error: s.error }; }
       }
       if (!tries) { delete s.host; delete s.remote; saveRun(run); }
@@ -174,12 +177,17 @@ export class HostRouter implements SessionRuntime {
       if (run.steps[id].status === "skipped" || !run.steps[id].result) continue;
       let full: Record<string, unknown>;
       try { full = resolveResult(run, id, run.steps[id].result!); } catch { continue; }
+      let own: string; try { own = realpathSync(join(run.dir, id)); } catch { continue; }
       for (const a of Array.isArray(full.artifacts) ? full.artifacts : []) {
         if (typeof a !== "string" || !a.startsWith(join(run.dir, id) + "/")) continue;
-        let st; try { st = lstatSync(a); } catch { continue; }
+        // The resolved file, not the spelling, must be inside the step's own directory: a symlink in a
+        // worktree must not send this machine's other files to the host.
+        let real: string; try { real = realpathSync(a); } catch { continue; }
+        if (!real.startsWith(own + "/")) { skipped.push(a); continue; }
+        let st; try { st = lstatSync(real); } catch { continue; }
         if (!st.isFile()) continue;
         if (st.size > 32 * 1024 * 1024) { skipped.push(a); continue; }
-        const body = readFileSync(a);
+        const body = readFileSync(real);
         evidence.push({ rel: relative(run.dir, a), base64: body.toString("base64"), sha256: createHash("sha256").update(body).digest("hex") });
       }
     }

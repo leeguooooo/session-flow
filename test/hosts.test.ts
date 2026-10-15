@@ -311,6 +311,14 @@ test("a lost start answer after gc is never started again: the tombstone makes i
   expect(readFileSync(join(base, "host-mini", "count"), "utf8")).toBe("x\n");
 }, 60_000);
 
+// Slots claimed over an hour ago, so a test exercises only the protection it names.
+function ageSlots() {
+  const dir = join(process.env.SFLOW_HOME!, "slots");
+  for (const n of existsSync(dir) ? readdirSync(dir) : []) {
+    const f = join(dir, n, "owner.json"), o = JSON.parse(readFileSync(f, "utf8"));
+    writeFileSync(f, JSON.stringify({ ...o, since: Date.now() - 2 * 3600_000 }));
+  }
+}
 function gcRun(id: string, mirror = true): Run {
   const dir = join(process.env.SFLOW_HOME!, "runs", id), socketDir = join(base, `sf-${id.slice(0, 12)}`);
   mkdirSync(dir, { recursive: true }); mkdirSync(socketDir, { recursive: true, mode: 0o700 });
@@ -374,6 +382,7 @@ test("gc keeps an old mirror with a real live tmux worker", async () => {
   const file = join(run.dir, "run.json"), old = new Date(Date.now() - 8 * 86400_000);
   utimesSync(file, old, old);
   expect(await claimSlot(`step:${run.id}:a`, 1)).toBe("new");
+  ageSlots();
   try {
     const started = spawnSync("tmux", ["-S", run.socket, "new-session", "-d", "-s", "x", "sleep", "30"], { encoding: "utf8" });
     expect(started.status).toBe(0);
@@ -381,6 +390,8 @@ test("gc keeps an old mirror with a real live tmux worker", async () => {
     expect(existsSync(file)).toBe(true);
     expect(readdirSync(join(process.env.SFLOW_HOME, "slots"))).toHaveLength(1);
   } finally { spawnSync("tmux", ["-S", run.socket, "kill-server"]); }
+  // The live session alone kept it: once it is gone, the same run is collected.
+  expect(await gc({ days: 7 })).toEqual({ removed: [], mirrors: [run.id] });
 });
 
 test("gc keeps corrupt but parseable mirror records", async () => {
@@ -407,9 +418,13 @@ test("gc keeps a mirror while checkout preparation is in progress", async () => 
   mkdirSync(join(run.dir, "preparing"));
   writeFileSync(join(run.dir, "preparing", "synthetic-operation"), "");
   expect(await claimSlot(`step:${run.id}:a`, 1)).toBe("new");
+  ageSlots();
   expect(await gc({ days: 0 })).toEqual({ removed: [], mirrors: [] });
   expect(existsSync(join(run.dir, "run.json"))).toBe(true);
   expect(readdirSync(join(process.env.SFLOW_HOME, "slots"))).toHaveLength(1);
+  // The marker alone kept it: once preparation ends, the same run is collected.
+  rmSync(join(run.dir, "preparing"), { recursive: true });
+  expect(await gc({ days: 0 })).toEqual({ removed: [], mirrors: [run.id] });
 });
 
 test("a slot whose runner died but whose command group lives is not reclaimed", async () => {

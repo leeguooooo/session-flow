@@ -191,7 +191,13 @@ export class HostRouter implements SessionRuntime {
         evidence.push({ rel: relative(run.dir, a), base64: body.toString("base64"), sha256: createHash("sha256").update(body).digest("hex") });
       }
     }
-    for (let i = 0; i < evidence.length; i += 8) await link.call("put", { runId: run.id, files: evidence.slice(i, i + 8) }, 300_000);
+    // Batches by size, not count: one ssh call carries at most ~16 MB of files (one file may exceed it alone).
+    for (let i = 0; i < evidence.length;) {
+      const batch = [evidence[i++]];
+      let bytes = batch[0].base64.length;
+      while (i < evidence.length && bytes + evidence[i].base64.length <= 16 * 1024 * 1024) { bytes += evidence[i].base64.length; batch.push(evidence[i++]); }
+      await link.call("put", { runId: run.id, files: batch }, 300_000);
+    }
     const moved = (p: string) => paths[p.split("/").pop()!] ?? p;
     const out: TaskEvent = { ...task, workspace, pathMap: s.remote?.pathMap, ...(skipped.length ? { evidenceNotCopied: skipped } : {}) };
     delete out.workspaceObservation;
@@ -208,6 +214,8 @@ export class HostRouter implements SessionRuntime {
     let body: TaskEvent;
     // Before anything is sent the outcome is known: nothing reached the worker's channel.
     try { body = await this.remoteTask(run, step, task); } catch (e) { throw new NotSent((e as Error).message); }
+    // Remote paths can make the assignment longer than the one checked before placement.
+    if (Buffer.byteLength(JSON.stringify(body)) > 99000) throw new NotSent("assignment exceeds the OCS message limit once paths are mapped to the host");
     await this.link(run, run.steps[step.id].host!).call("send", { runId: run.id, body });
   }
   // Each host's channel, tagged; terminal results are copied next to local ones and hash-checked.

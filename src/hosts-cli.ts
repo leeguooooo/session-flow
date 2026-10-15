@@ -132,7 +132,8 @@ export async function hostsCommand(args: string[], _router: HostRouter): Promise
       if (!code) code = await run([...ssh, "chmod 755 \"$HOME/.local/bin/sflow.new\" && mv \"$HOME/.local/bin/sflow.new\" \"$HOME/.local/bin/sflow\" && \"$HOME/.local/bin/sflow\" version"]);
       return code;
     }
-    return run([...ssh, "curl -fsSL https://raw.githubusercontent.com/leeguooooo/session-flow/main/install.sh | SFLOW_INSTALL_SKILLS=0 sh"]);
+    // ssh runs a non-login shell; widen PATH so the installer's tool check sees what sflow will find.
+    return run([...ssh, "PATH=\"$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"; export PATH; curl -fsSL https://raw.githubusercontent.com/leeguooooo/session-flow/main/install.sh | SFLOW_INSTALL_SKILLS=0 sh"]);
   }
   throw new Error(`unknown hosts command ${sub}\n${USAGE}`);
 }

@@ -498,7 +498,7 @@ export async function gc(input: any) {
         run = loadRun(id);
         const preparing = join(dir, "preparing");
         if (existsSync(preparing) && readdirSync(preparing).length) return;
-        if (!run.mirror || Date.now() - statSync(file).mtimeMs < days * 86400_000) return;
+        if (!run.mirror || (days > 0 && Date.now() - statSync(file).mtimeMs < days * 86400_000)) return;
         // Only this mirror's private socket; either tmux answer can prove a worker is live.
         let socketExists = true;
         try { lstatSync(run.socket); } catch (e) {

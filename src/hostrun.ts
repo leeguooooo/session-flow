@@ -7,7 +7,7 @@ import { saveRun } from "./store";
 import { sessionRoot, workspaceRoot } from "./config";
 import { candidates, LocalLink, SshLink, unfit, type Hello, type Link } from "./hosts";
 import { freeze, push, type Frozen } from "./gitsync";
-import { resultFile, storeResult } from "./results";
+import { resolveResult, resultFile, storeResult } from "./results";
 import { field, parseBody } from "./engine";
 import { safeRelative } from "./remote";
 import type { Menu } from "./prompt";
@@ -98,7 +98,10 @@ export class HostRouter implements SessionRuntime {
         reasons.push(`${name} has no free slot`);
       } catch (e) {
         reasons.push((e as Error).message);
-        await this.link(run, name).call("release", { runId: run.id, root: sessionRoot(run.workflow.steps, step) }).catch(() => {});
+        // Only a first round may give its session's slot back; a continuation's slot belongs to the
+        // retained worker it continues.
+        if (sessionRoot(run.workflow.steps, step) === step.id)
+          await this.link(run, name).call("release", { runId: run.id, root: step.id }).catch(() => {});
         if (tries) { s.error = `preparing on ${name} failed: ${(e as Error).message}`; return { error: s.error }; }
       }
       if (!tries) { delete s.host; delete s.remote; saveRun(run); }
@@ -167,8 +170,36 @@ export class HostRouter implements SessionRuntime {
       for (const v of Object.values(manifest!)) if (typeof v?.resultFile === "string") upload(v.resultFile);
     }
     const { paths } = files.length ? await link.call<{ paths: Record<string, string> }>("put", { runId: run.id, files: files.map(({ local: _, ...f }) => f) }) : { paths: {} };
+    // Logs and artifacts a dependency's result names inside this run go along at the same relative
+    // path, so the run-directory entry in pathMap leads to real files there.
+    const evidence: { rel: string; base64: string; sha256: string }[] = [], skipped: string[] = [];
+    for (const id of step.dependsOn) {
+      if (run.steps[id].status === "skipped" || !run.steps[id].result) continue;
+      let full: Record<string, unknown>;
+      try { full = resolveResult(run, id, run.steps[id].result!); } catch { continue; }
+      let own: string; try { own = realpathSync(join(run.dir, id)); } catch { continue; }
+      for (const a of Array.isArray(full.artifacts) ? full.artifacts : []) {
+        if (typeof a !== "string" || !a.startsWith(join(run.dir, id) + "/")) continue;
+        // The resolved file, not the spelling, must be inside the step's own directory: a symlink in a
+        // worktree must not send this machine's other files to the host.
+        let real: string; try { real = realpathSync(a); } catch { continue; }
+        if (!real.startsWith(own + "/")) { skipped.push(a); continue; }
+        let st; try { st = lstatSync(real); } catch { continue; }
+        if (!st.isFile()) continue;
+        if (st.size > 32 * 1024 * 1024) { skipped.push(a); continue; }
+        const body = readFileSync(real);
+        evidence.push({ rel: relative(run.dir, a), base64: body.toString("base64"), sha256: createHash("sha256").update(body).digest("hex") });
+      }
+    }
+    // Batches by size, not count: one ssh call carries at most ~16 MB of files (one file may exceed it alone).
+    for (let i = 0; i < evidence.length;) {
+      const batch = [evidence[i++]];
+      let bytes = batch[0].base64.length;
+      while (i < evidence.length && bytes + evidence[i].base64.length <= 16 * 1024 * 1024) { bytes += evidence[i].base64.length; batch.push(evidence[i++]); }
+      await link.call("put", { runId: run.id, files: batch }, 300_000);
+    }
     const moved = (p: string) => paths[p.split("/").pop()!] ?? p;
-    const out: TaskEvent = { ...task, workspace, pathMap: s.remote?.pathMap };
+    const out: TaskEvent = { ...task, workspace, pathMap: s.remote?.pathMap, ...(skipped.length ? { evidenceNotCopied: skipped } : {}) };
     delete out.workspaceObservation;
     out.dependencies = Object.fromEntries(Object.entries(task.dependencies).map(([k, v]) => [k, typeof v.resultFile === "string" ? { ...v, resultFile: moved(v.resultFile) } : v]));
     if (manifest) {
@@ -180,7 +211,12 @@ export class HostRouter implements SessionRuntime {
     return out;
   }
   async sendTask(run: Run, step: Step, task: TaskEvent) {
-    await this.link(run, run.steps[step.id].host!).call("send", { runId: run.id, body: await this.remoteTask(run, step, task) });
+    let body: TaskEvent;
+    // Before anything is sent the outcome is known: nothing reached the worker's channel.
+    try { body = await this.remoteTask(run, step, task); } catch (e) { throw new NotSent((e as Error).message); }
+    // Remote paths can make the assignment longer than the one checked before placement.
+    if (Buffer.byteLength(JSON.stringify(body)) > 99000) throw new NotSent("assignment exceeds the OCS message limit once paths are mapped to the host");
+    await this.link(run, run.steps[step.id].host!).call("send", { runId: run.id, body });
   }
   // Each host's channel, tagged; terminal results are copied next to local ones and hash-checked.
   async remoteRows(run: Run): Promise<Message[]> {
@@ -449,6 +485,7 @@ export class HostRouter implements SessionRuntime {
     catch (e) { s.error = `cancellation on ${s.host} unknown: ${(e as Error).message}`; saveRun(run); }
   }
 }
+export class NotSent extends Error { readonly notSent = true; }
 function ancestors(run: Run, step: Step, seen = new Set<string>()): string[] {
   for (const d of step.dependsOn) if (!seen.has(d)) { seen.add(d); ancestors(run, run.workflow.steps.find(x => x.id === d)!, seen); }
   return [...seen];

@@ -224,5 +224,11 @@ updates the mirror's previous-round state first. status, logs, answer, attach,
 stop and cancel go through the same remote operations. Remote sessions count
 toward the workflow's concurrency and hold a host slot until they are closed.
 A step placed on a host that never runs (the run stays blocked) keeps that slot
-until `stop` or the run's cleanup; `sflow hosts check` lists slot owners. Running
+until `stop` or the run's cleanup; `sflow hosts check` lists slot owners. `sflow hosts gc` also removes mirror runs older than its
+cutoff that validate as mirrors, have no live tmux session (probed under the
+journal lock, 3 s bound, a timeout keeps the run), no checkout being prepared and
+no slot claimed in the last hour; under the lock it only releases slots and moves
+the run aside, deleting after. Known limit: the hour is a grace period, not a
+lease, so `--days 0` during a placement that takes longer than an hour (a huge
+evidence upload) can remove that mirror. Running
 command jobs (and uncertain ones) count toward `concurrency` together with sessions.

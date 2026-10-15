@@ -86,8 +86,14 @@ function stale(owner: string): boolean {
   // before any start proves nothing runs.
   return existsSync(join(dir, "cancel.json"));
 }
-function claimLocked(owner: string, slots: number): boolean {
-  if (slotOwners().some(s => s.owner === owner)) return true;
+// "held": this owner already had a slot (a retained session); "new": claimed now; false: none free.
+function claimLocked(owner: string, slots: number): "held" | "new" | false {
+  const mine = slotOwners().find(s => s.owner === owner);
+  if (mine) {
+    // A renewed claim restarts gc's grace period: the driver is using this slot again.
+    writeFileSync(join(slotsDir(), mine.slot, "owner.json"), JSON.stringify({ owner, since: Date.now() }), { mode: 0o600 });
+    return "held";
+  }
   for (let i = 0; i < slots; i++) {
     const path = join(slotsDir(), String(i));
     if (existsSync(path)) {
@@ -96,7 +102,7 @@ function claimLocked(owner: string, slots: number): boolean {
     }
     mkdirSync(path, { mode: 0o700 });
     writeFileSync(join(path, "owner.json"), JSON.stringify({ owner, since: Date.now() }), { mode: 0o600 });
-    return true;
+    return "new";
   }
   return false;
 }
@@ -275,29 +281,53 @@ export async function prepare(input: any) {
   const run = input?.run as Run, stepId = input?.stepId as string;
   if (!run || !RUN.test(run.id) || !STEP.test(stepId)) throw new Error("invalid prepare request");
   const dir = join(dataHome(), "runs", run.id);
+  const preparing = join(dir, "preparing", randomUUID());
+  await withLock(() => {
+    if (existsSync(join(dir, "run.json"))) mirrorRun(run.id);
+    mkdirSync(dirname(preparing), { recursive: true, mode: 0o700 });
+    // Retained after a crash: an unfinished checkout must not be collected.
+    writeFileSync(preparing, "", { mode: 0o600 });
+  });
+  try { return await prepareMirror(input); }
+  finally { await withLock(() => { rmSync(preparing, { force: true }); }); }
+}
+async function prepareMirror(input: any) {
+  const run = input.run as Run, stepId = input.stepId as string;
+  const dir = join(dataHome(), "runs", run.id);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const socketDir = join(process.env.TMPDIR ?? "/tmp", `sf-${run.id.slice(0, 12)}`);
   mkdirSync(socketDir, { recursive: true, mode: 0o700 });
-  const existing = existsSync(join(dir, "run.json")) ? loadRun(run.id) : undefined;
-  if (existing && !existing.mirror) throw new Error("a run with this id is driven on this host; refusing to mirror over it");
   const step = run.workflow.steps.find(s => s.id === stepId);
   if (!step) throw new Error("step missing from mirror");
-  const root = sessionRoot(run.workflow.steps, step);
-  if (!await claimSlot(`step:${run.id}:${root}`, Number(input.slots))) return { state: "busy" };
+  const root = sessionRoot(run.workflow.steps, step), owner = `step:${run.id}:${root}`;
+  const claim = await claimSlot(owner, Number(input.slots));
+  if (!claim) return { state: "busy" };
   // Checkouts the step reads or writes, then remote paths for every driver path they replace.
   const pathMap: Record<string, string> = {};
-  for (const c of (input.checkouts ?? []) as (Checkout & { local: string; sub?: string })[]) {
-    if (c.sub !== undefined && c.sub !== "." && !safeRelative(c.sub)) throw new Error("invalid checkout subdirectory");
-    pathMap[c.local] = join(await checkout(run.id, c), c.sub ?? ".");
+  try {
+    for (const c of (input.checkouts ?? []) as (Checkout & { local: string; sub?: string })[]) {
+      if (c.sub !== undefined && c.sub !== "." && !safeRelative(c.sub)) throw new Error("invalid checkout subdirectory");
+      pathMap[c.local] = join(await checkout(run.id, c), c.sub ?? ".");
+    }
+    return await publishMirror(run, stepId, step, dir, socketDir, pathMap, input);
+  } catch (e) {
+    // A slot this call claimed goes back; one a retained session already held stays with it.
+    if (claim === "new") await releaseSlot(owner);
+    throw e;
   }
-  const mirror: Run = { ...existing, ...run, dir, socket: join(socketDir, "tmux.sock"), mirror: { driver: String(input.driver ?? "") },
-    steps: { ...(existing?.steps ?? {}), ...run.steps } };
-  mirror.workflow = { ...run.workflow, steps: run.workflow.steps.map(s => {
-    const prev = existing?.workflow.steps.find(x => x.id === s.id);
-    return s.id === stepId ? { ...s, cwd: pathMap[s.cwd] ?? s.cwd } : prev ?? s;
-  }) };
-  saveRun(mirror);
-  return { state: "ready", dir, cwd: pathMap[step.cwd] ?? step.cwd, pathMap };
+}
+function publishMirror(run: Run, stepId: string, step: Step, dir: string, socketDir: string, pathMap: Record<string, string>, input: any) {
+  return withLock(() => {
+    const existing = existsSync(join(dir, "run.json")) ? mirrorRun(run.id) : undefined;
+    const mirror: Run = { ...existing, ...run, dir, socket: join(socketDir, "tmux.sock"), mirror: { driver: String(input.driver ?? "") },
+      steps: { ...(existing?.steps ?? {}), ...run.steps } };
+    mirror.workflow = { ...run.workflow, steps: run.workflow.steps.map(s => {
+      const prev = existing?.workflow.steps.find(x => x.id === s.id);
+      return s.id === stepId ? { ...s, cwd: pathMap[s.cwd] ?? s.cwd } : prev ?? s;
+    }) };
+    saveRun(mirror);
+    return { state: "ready", dir, cwd: pathMap[step.cwd] ?? step.cwd, pathMap };
+  });
 }
 export function updateStep(input: any) {
   const run = mirrorRun(input?.runId), id = input?.stepId;
@@ -310,10 +340,14 @@ export function put(input: any) {
   const run = mirrorRun(input?.runId), out: Record<string, string> = {};
   const inbound = join(run.dir, "inbound"); mkdirSync(inbound, { recursive: true, mode: 0o700 });
   for (const f of input.files ?? []) {
-    if (typeof f.name !== "string" || !/^[\w.-]{1,120}$/.test(f.name)) throw new Error("invalid file name");
+    // rel: evidence of a dependency, kept at its run-relative path so pathMap finds it here.
+    if (f.rel !== undefined ? typeof f.rel !== "string" || !safeRelative(f.rel) || !/^[a-z][a-z0-9-]{0,39}\//.test(f.rel)
+      : typeof f.name !== "string" || !/^[\w.-]{1,120}$/.test(f.name)) throw new Error("invalid file name");
     const body = Buffer.from(String(f.base64), "base64");
-    if (createHash("sha256").update(body).digest("hex") !== f.sha256) throw new Error(`${f.name}: hash mismatch on arrival`);
-    writeFileSync(join(inbound, f.name), body, { mode: 0o600 }); out[f.name] = join(inbound, f.name);
+    if (createHash("sha256").update(body).digest("hex") !== f.sha256) throw new Error(`${f.rel ?? f.name}: hash mismatch on arrival`);
+    const dest = f.rel !== undefined ? join(run.dir, f.rel) : join(inbound, f.name);
+    mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
+    writeFileSync(dest, body, { mode: 0o600 }); out[f.rel ?? f.name] = dest;
   }
   return { paths: out };
 }
@@ -341,6 +375,10 @@ export async function patchFile(input: any) {
   return { path: out, sha256: createHash("sha256").update(body).digest("hex"), bytes: body.length, base, commit: frozen.commit, tree: frozen.tree };
 }
 export async function rt(input: any, cli: string[]) {
+  if (input.action === "create" || input.action === "continue") return withLock(() => runtimeAction(input, cli));
+  return runtimeAction(input, cli);
+}
+async function runtimeAction(input: any, cli: string[]) {
   const run = mirrorRun(input?.runId), id = input?.stepId as string;
   if (!run.steps[id]) throw new Error("unknown step");
   const runtime = new TmuxRuntime(cli), step = run.workflow.steps.find(s => s.id === id)!;
@@ -361,14 +399,30 @@ export async function rt(input: any, cli: string[]) {
 export async function cleanup(input: any) {
   const run = mirrorRun(input?.runId);
   await withLock(() => { for (const s of slotOwners()) if (s.owner.startsWith(`step:${run.id}:`)) releaseLocked(s.owner); });
-  const dir = checkoutsDir(run.id);
+  await removeCheckouts(run.id);
+  return { ok: true };
+}
+// Removed checkouts are gone from disk; pruning drops their registration from each bare repository.
+async function emptyTrash(trash: string) {
+  const repos = new Set<string>();
+  const checkouts = join(trash, "checkouts");
+  for (const name of existsSync(checkouts) ? readdirSync(checkouts) : []) {
+    let gitfile: RegExpMatchArray | null = null;
+    try { gitfile = readFileSync(join(checkouts, name, ".git"), "utf8").match(/^gitdir: (.+)\/worktrees\/[^/]+\s*$/m); } catch {}
+    if (gitfile) repos.add(gitfile[1]);
+  }
+  rmSync(trash, { recursive: true, force: true });
+  for (const repo of repos) await command(["git", "-C", repo, "worktree", "prune"], { timeoutMs: 300_000 }).catch(() => {});
+}
+async function removeCheckouts(runId: string) {
+  const dir = checkoutsDir(runId);
   if (existsSync(dir)) for (const name of readdirSync(dir)) {
     const path = join(dir, name);
     const common = (await command(["git", "-C", path, "rev-parse", "--git-common-dir"])).stdout.trim();
     if (common) await command(["git", "-C", common, "worktree", "remove", "--force", path], { timeoutMs: 300_000 });
     rmSync(path, { recursive: true, force: true });
   }
-  return { ok: true };
+  rmSync(dir, { recursive: true, force: true });
 }
 
 // The one interactive operation: ssh -t <host> sflow remote attach <run> <step>.
@@ -380,13 +434,12 @@ export async function attach(runId: string, stepId: string, cli: string[]) {
   const child = spawn(argv[0], argv.slice(1), { stdio: "inherit" });
   await new Promise<void>(res => child.on("exit", c => { process.exitCode = c ?? 1; res(); }));
 }
-// Finished jobs older than the cutoff: their directory and the ref that carried their input.
+// Finished jobs keep tombstones; old mirrors without live workers can be removed entirely.
 export async function gc(input: any) {
   const days = Number(input?.days ?? 7);
   if (!Number.isFinite(days) || days < 0) throw new Error("invalid days");
-  const root = join(dataHome(), "jobs"), removed: string[] = [];
-  if (!existsSync(root)) return { removed };
-  for (const id of readdirSync(root)) {
+  const root = join(dataHome(), "jobs"), removed: string[] = [], mirrors: string[] = [], doomed: string[] = [];
+  for (const id of existsSync(root) ? readdirSync(root) : []) {
     if (!JOB.test(id)) continue;
     const dir = join(root, id), exit = readJSON(join(dir, "exit.json"));
     if (existsSync(join(dir, "tombstone.json")) || !exit || Date.now() - Number(exit.finishedAt ?? 0) < days * 86400_000) continue;
@@ -399,7 +452,50 @@ export async function gc(input: any) {
     });
     removed.push(id);
   }
-  return { removed };
+  const runs = join(dataHome(), "runs");
+  for (const id of existsSync(runs) ? readdirSync(runs) : []) {
+    if (!RUN.test(id)) continue;
+    await withLock(async () => {
+      const dir = join(runs, id), file = join(dir, "run.json");
+      let run: Run;
+      try {
+        run = loadRun(id);
+        const preparing = join(dir, "preparing");
+        if (existsSync(preparing) && readdirSync(preparing).length) return;
+        if (!run.mirror || Date.now() - statSync(file).mtimeMs < days * 86400_000) return;
+        // Only this mirror's private socket; either tmux answer can prove a worker is live.
+        let socketExists = true;
+        try { lstatSync(run.socket); } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "ENOENT") return;
+          socketExists = false;
+        }
+        if (socketExists) {
+          const absent = (r: Awaited<ReturnType<typeof command>>) => r.code === 1 && !r.stdout.trim()
+            && /no server running|no sessions|error connecting to .*\((No such file or directory|Connection refused)\)/.test(r.stderr);
+          // Under the lock on purpose (a worker could start between an unlocked probe and the delete);
+          // bounded, and a probe that times out keeps the run.
+          const has = await command(["tmux", "-S", run.socket, "has-session"], { timeoutMs: 3000 });
+          if (!absent(has)) return;
+          const list = await command(["tmux", "-S", run.socket, "list-sessions"], { timeoutMs: 3000 });
+          if (!absent(list)) return;
+        }
+      } catch { return; } // Invalid records and inconclusive probes are kept.
+      // A slot claimed in the last hour means a driver is placing or starting a step there (prepare
+      // finishes before the session exists); even --days 0 waits for that.
+      if (slotOwners().some(x => x.owner.startsWith(`step:${id}:`) && Date.now() - Number(x.since ?? 0) < 3600_000)) return;
+      for (const s of slotOwners()) if (s.owner.startsWith(`step:${id}:`)) releaseLocked(s.owner);
+      // Under the lock only renames: the run and its checkouts leave their names at once, so a later
+      // prepare starts a fresh mirror. The slow deletion happens after the lock is released.
+      const trash = join(dataHome(), "trash", `${id}-${randomUUID()}`);
+      mkdirSync(trash, { recursive: true, mode: 0o700 });
+      renameSync(dir, join(trash, "run"));
+      if (existsSync(checkoutsDir(id))) renameSync(checkoutsDir(id), join(trash, "checkouts"));
+      doomed.push(trash);
+      mirrors.push(id);
+    });
+  }
+  for (const trash of doomed) await emptyTrash(trash);
+  return { removed, mirrors };
 }
 export async function serve(op: string, version: string, cli: string[]): Promise<void> {
   widenPath();

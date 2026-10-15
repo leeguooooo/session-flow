@@ -239,14 +239,18 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
     if (!assignments.length) {
       s.status = "dispatching"; saveRun(run);
       let task: TaskEvent;
-      try { task = buildTask(run, step); } catch (e) {
-        s.status = "blocked"; s.error = `dependency evidence unavailable: ${String(e)}`; saveRun(run); continue;
-      }
-      if (Buffer.byteLength(JSON.stringify(task)) > 99000) {
-        s.status = "failed"; s.error = "assignment exceeds OCS message limit; shorten prompt or dependency fan-in"; saveRun(run); continue;
-      }
+      // Ends a step whose assignment was never sent; a first round placed on a host gives its slot back.
+      const unsent = async (status: "blocked" | "failed", error: string) => {
+        s.status = status; s.error = error; saveRun(run);
+        if (s.remote && !step.reuseSession) await runtime.stop(run, step.id).catch(() => {});
+      };
+      try { task = buildTask(run, step); } catch (e) { await unsent("blocked", `dependency evidence unavailable: ${String(e)}`); continue; }
+      if (Buffer.byteLength(JSON.stringify(task)) > 99000) { await unsent("failed", "assignment exceeds OCS message limit; shorten prompt or dependency fan-in"); continue; }
       try { if (runtime.remoteStep?.(run, step.id)) await runtime.sendTask!(run, step, task); else await transport.send(run.channel, task, sender); }
-      catch (e) { s.status = "uncertain"; s.uncertainty = "dispatch"; s.error = String(e); saveRun(run); continue; }
+      catch (e) {
+        if ((e as { notSent?: boolean }).notSent) { await unsent("blocked", `assignment not sent: ${(e as Error).message}`); continue; }
+        s.status = "uncertain"; s.uncertainty = "dispatch"; s.error = String(e); saveRun(run); continue;
+      }
     }
     s.status = "launching"; s.startedAt = Date.now(); s.prefixGroup = group; saveRun(run);
     try {

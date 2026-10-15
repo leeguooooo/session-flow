@@ -193,6 +193,8 @@ test("a command step reads the worktree an earlier write step left", async () =>
   writeFileSync(join(wt, "made.txt"), "from impl\n");
   Object.assign(run.steps.impl, { status: "done", result: { status: "done", summary: "ok" }, actor: "codex-12345678" });
   const rt = router(), tr = new NoTransport();
+  // The stand-in write step has no tmux session (CI runners may have no tmux at all).
+  rt.local.exists = async () => false;
   await until(run, rt, tr, () => run.status !== "running");
   expect(run.steps.test.status).toBe("done");
   expect(readFileSync(join(run.dir, "test", "log.txt"), "utf8")).toBe("from impl\n");

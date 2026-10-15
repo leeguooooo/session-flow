@@ -314,7 +314,7 @@ test("a lost start answer after gc is never started again: the tombstone makes i
 function gcRun(id: string, mirror = true): Run {
   const dir = join(process.env.SFLOW_HOME!, "runs", id), socketDir = join(base, `sf-${id.slice(0, 12)}`);
   mkdirSync(dir, { recursive: true }); mkdirSync(socketDir, { recursive: true, mode: 0o700 });
-  const workflow = parseWorkflow({ version: 1, name: "gc", steps: [{ id: "a", agent: "codex", cwd: project }] }, base);
+  const workflow = parseWorkflow({ version: 1, name: "gc", steps: [{ id: "a", agent: "codex", prompt: "synthetic gc worker", cwd: project }] }, base);
   const run: Run = { version: 2, id, dir, socket: join(socketDir, "tmux.sock"), channel: `sflow-${id}`,
     workflow, createdAt: Date.now(), status: "running", steps: { a: { status: "pending", token: "synthetic", session: "sf-a" } },
     ...(mirror ? { mirror: { driver: "other" } } : {}) };

@@ -9,7 +9,7 @@
       "cwd": "/PROJECT",
       "policy": "workspace-write",
       "worktree": true,
-      "prompt": "Task: snapshot-task\nImplement it in your isolated git worktree (your current working directory). Keep the change as small as the task allows and follow the project's conventions. Run the project's relevant checks. Do not commit, push or merge.\nReport done with: summary; details.workspace = absolute path of the worktree; artifacts = the files you changed; checks = [{\"command\": ..., \"passed\": true|false, \"output\": last lines}]. Report blocked if you cannot finish."
+      "prompt": "Task: snapshot-task\nImplement it in your isolated git worktree (your current working directory). It is a fresh checkout: install the project's dependencies first if its checks need them. Keep the change as small as the task allows and follow the project's conventions. Run the project's relevant checks. Do not commit, push or merge.\nReport done with: summary; details.workspace = absolute path of the worktree; artifacts = the files you changed; checks = [{\"command\": ..., \"passed\": true|false, \"output\": last lines}]. Report blocked if you cannot finish."
     },
     {
       "id": "review-1",

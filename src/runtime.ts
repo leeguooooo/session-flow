@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { checked, command, cleanEnv, quote } from "./process";
 import { sessionRoot } from "./config";
 import { saveRun } from "./store";
@@ -55,9 +55,10 @@ export class TmuxRuntime implements SessionRuntime {
     // per-worker protocol wrapper restores only this run's context; no global
     // shell_environment_policy override or credential inheritance is required.
     const protocol = join(dir, "worker");
-    // A private temp directory inside the paths the worker may write: tests that create temp files
-    // run without a sandbox approval (Codex excludes /tmp and the inherited TMPDIR).
-    const tmp = step.policy === "read-only" ? join(commonCwd, "tmp", step.id) : join(dir, "tmp");
+    // A private temp directory the worker may write, so tests that create temp files run without a
+    // sandbox approval (Codex excludes /tmp and the inherited TMPDIR; this one is added explicitly).
+    // It sits in the system temp, not in sflow's state: a project must never be inside that.
+    const tmp = join(tmpdir(), `sflow-${run.id.slice(0, 8)}-${step.id}`);
     mkdirSync(tmp, { mode: 0o700, recursive: true });
     const contextEnv: Record<string, string> = {
       SFLOW_HOME: process.env.SFLOW_HOME ?? join(homedir(), ".local/state/session-flow"),
@@ -111,7 +112,7 @@ Report once using ${cliText} report done '<summary>' (or failed/blocked), adding
       argv = ["codex", "--no-alt-screen", "--no-daemon", "--sandbox", "workspace-write",
         "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
         "--ask-for-approval", "on-request", "--add-dir", step.policy === "read-only" ? commonCwd : dir,
-        "--add-dir", commonCwd,
+        "--add-dir", commonCwd, "--add-dir", tmp,
         "--add-dir", process.env.OCS_HOME ?? join(homedir(), ".ocs")];
       if (step.model) argv.push("--model", step.model);
       argv.push("--", prompt);

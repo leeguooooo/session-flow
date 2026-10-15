@@ -19,7 +19,7 @@ export interface TestGate { command: string[] }
 export const TESTED = (id: string, cmd: string[]) => `The ${id} dependency is a command step that ran \`${cmd.join(" ")}\` on that worktree. Read its exit code and log (details.exitCode, details.logTail, the log file) before judging; a non-zero exit is a problem that blocks acceptance unless the task says otherwise.`;
 
 export const IMPLEMENT = (task: string) => `Task: ${task}
-Implement it in your isolated git worktree (your current working directory). Keep the change as small as the task allows and follow the project's conventions. Run the project's relevant checks. Do not commit, push or merge.
+Implement it in your isolated git worktree (your current working directory). It is a fresh checkout: install the project's dependencies first if its checks need them. Keep the change as small as the task allows and follow the project's conventions. Run the project's relevant checks. Do not commit, push or merge.
 Report done with: summary; details.workspace = absolute path of the worktree; artifacts = the files you changed; checks = [{"command": ..., "passed": true|false, "output": last lines}]. Report blocked if you cannot finish.`;
 export const REVIEW = (task: string, after: string) => `Task under review: ${task}
 Find the worktree path in the ${after} dependency result (details.workspace). Inspect the actual change there yourself: git -C <path> status and git -C <path> diff. Rerun the key checks when you can do so without editing. Do not rely on the implementer's summary.

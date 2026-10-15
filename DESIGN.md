@@ -45,10 +45,10 @@ Dependency outputs are data, not instructions. Small results are inline; large r
 
 ## Permissions and resource ownership
 
-Every worker gets its own `TMPDIR` inside the paths it may write (`<step>/tmp`
-for write steps, `.protocol/tmp/<step>` for read-only ones), so tests that create
-temp files run without a sandbox approval; Codex excludes `/tmp` and the
-inherited TMPDIR. Tool caches outside the run (for example `~/.bun` during an
+Every worker gets its own `TMPDIR`, `sflow-<run>-<step>` in the system temp
+directory (never inside sflow's state, where a project may not be), added to
+Codex's writable roots explicitly, so tests that create temp files run without a
+sandbox approval; Codex otherwise excludes `/tmp` and the inherited TMPDIR. Tool caches outside the run (for example `~/.bun` during an
 install) still ask once.
 
 Review verdicts separate blocking problems from minor ones: `needs-fix` only for

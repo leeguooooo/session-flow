@@ -21,10 +21,13 @@ import { doctor, renderChecks } from "./doctor";
 import { buildPreset, PRESETS } from "./presets";
 import { maybeNotice, runUpdateCheck, upgrade, UPDATE_CHECK_COMMAND } from "./upgrade";
 import { templateCommand, configCommand, startPlan, describePlan, originSummary } from "./template-cli";
+import { HostRouter } from "./hostrun";
+import { hostsCommand, hostPreflight, freezeHosts } from "./hosts-cli";
+import { attach as remoteAttach, serve as remoteServe } from "./remote";
 import pkg from "../package.json";
 
 const cli = import.meta.path.includes("$bunfs") ? [process.execPath] : [process.execPath, import.meta.path];
-const transport = new OcsTransport(), runtime = new TmuxRuntime(cli);
+const transport = new OcsTransport(), runtime = new HostRouter(new TmuxRuntime(cli), cli);
 const args = process.argv.slice(2);
 function print(value: unknown) { console.log(JSON.stringify(value, null, 2)); }
 function publicRun(run: ReturnType<typeof loadRun>, full = false) {
@@ -96,6 +99,8 @@ sflow task                          worker: read assignment and report acceptanc
 sflow report --file <result.json>    worker: report done/blocked/failed
 sflow report done '<summary>' [--check …] [--artifact …] [--detail k=v]  worker: report (or failed/blocked)
 sflow report --json '<JSON>'         worker: report without writing a file
+sflow hosts list|add|remove|check|install  machines steps can run on over ssh (see sflow hosts)
+sflow remote <op>                    host side of a step on this machine (called over ssh)
 sflow skill install                 install the sflow skill for Claude Code, Codex, Pi and agy
 sflow upgrade [--check|--json]       install the latest release and refresh the skill
 sflow version
@@ -105,6 +110,12 @@ Native tmux adapter currently supports macOS/Linux. Ctrl-C stops the driver,
 leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
   }
   if (cmd === "version" || cmd === "--version") { console.log(pkg.version); return; }
+  if (cmd === "remote") {
+    if (arg === "attach") { await remoteAttach(rest[0], rest[1], cli); return; }
+    if (!arg) throw new Error("remote <op>: called by another machine's sflow over ssh");
+    await remoteServe(arg, pkg.version, cli); return;
+  }
+  if (cmd === "hosts") { process.exitCode = await hostsCommand(args.slice(1), runtime); return; }
   if (cmd === UPDATE_CHECK_COMMAND) { await runUpdateCheck(); return; }
   if (cmd === "upgrade") {
     const flags = args.slice(1);
@@ -152,8 +163,9 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
     if (!json) for (const line of describePlan(plan)) console.error(line);
     if (dryRun) { print({ dryRun: true, ...plan }); return; }
     if (process.platform === "win32") throw new Error("tmux adapter requires macOS/Linux");
-    await preflight(requiredTools(runtime.binary, transport.binary, plan.workflow.steps.map(s => s.agent)));
-    const run = createRun(plan.workflow, plan.origin); print({ runId: run.id, channel: run.channel, origin: originSummary(plan.origin) });
+    await preflight(requiredTools(runtime.binary, transport.binary, plan.workflow.steps.filter(s => !s.host).map(s => s.agent)));
+    const hosts = freezeHosts(plan.workflow); await hostPreflight(plan.workflow, hosts);
+    const run = createRun(plan.workflow, plan.origin, hosts); print({ runId: run.id, channel: run.channel, origin: originSummary(plan.origin) });
     const unlock = lockRun(run);
     try { await driveWatched(run, progress as ProgressMode); } finally { unlock(); }
     print(publicRun(run)); if (run.status !== "done") { console.error(`Answer any prompt in sflow status (or logs/attach), then: sflow resume ${run.id}`); process.exitCode = 2; } return;
@@ -171,8 +183,9 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
     const file = resolve(arg), workflow = parseWorkflow(JSON.parse(readFileSync(file, "utf8")), dirname(file));
     if (cmd === "validate") { for (const line of describe(workflow)) console.error(line); print({ valid: true, workflow }); return; }
     if (process.platform === "win32") throw new Error("tmux adapter requires macOS/Linux");
-    await preflight(requiredTools(runtime.binary, transport.binary, workflow.steps.map(s => s.agent)));
-    const run = createRun(workflow); print({ runId: run.id, channel: run.channel });
+    await preflight(requiredTools(runtime.binary, transport.binary, workflow.steps.filter(s => !s.host).map(s => s.agent)));
+    const hosts = freezeHosts(workflow); await hostPreflight(workflow, hosts);
+    const run = createRun(workflow, undefined, hosts); print({ runId: run.id, channel: run.channel });
     const unlock = lockRun(run);
     try { await driveWatched(run, mode); } finally { unlock(); }
     print(publicRun(run)); if (run.status !== "done") { console.error(`Answer any prompt in sflow status (or logs/attach), then: sflow resume ${run.id}`); process.exitCode = 2; } return;
@@ -207,6 +220,13 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
   if (cmd === "attach" || cmd === "logs") {
     if (rest.length !== 1 || !run.steps[rest[0]]) throw new Error("valid step id required");
     if (cmd === "logs") {
+      const step = run.workflow.steps.find(x => x.id === rest[0])!;
+      if (step.agent === "command") {
+        const log = resolve(run.dir, rest[0], "log.txt");
+        if (existsSync(log)) { console.log(readFileSync(log, "utf8")); return; }
+        throw new Error(`${rest[0]} is a command on ${run.steps[rest[0]].host ?? "no host yet"}; its log arrives when the job exits (status: ${run.steps[rest[0]].status})`);
+      }
+      if (runtime.remoteStep(run, rest[0])) { console.log(await runtime.screen(run, rest[0])); return; }
       const archive = resolve(run.dir, rest[0], "terminal.txt");
       if (!await runtime.exists(run, rest[0]) && existsSync(archive)) { console.log(readFileSync(archive, "utf8")); return; }
       console.log(await checked([runtime.binary, "-S", run.socket, "capture-pane", "-p", "-t", `${run.steps[rest[0]].session}:0.0`, "-S", "-200"])); return;

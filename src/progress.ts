@@ -1,7 +1,8 @@
 import { createInterface } from "node:readline";
 import { menuKeys, parseMenu, type Menu } from "./prompt";
 import type { Run, Workflow } from "./types";
-import type { TmuxRuntime } from "./runtime";
+import type { Menu as _Menu } from "./prompt";
+type PromptRuntime = { waitingOnPrompt(run: Run, id: string): Promise<_Menu | null>; screen(run: Run, id: string): Promise<string>; keys(run: Run, id: string, keys: string[]): Promise<void> };
 
 export type ProgressMode = "text" | "json" | "none";
 const QUIET_MS = 120_000;
@@ -12,7 +13,12 @@ function since(ms: number) { const s = Math.max(0, Math.round(ms / 1000)); retur
 export function describe(workflow: Workflow): string[] {
   const lines = [`workflow ${workflow.name}: ${workflow.steps.length} step(s), up to ${workflow.concurrency} at a time`];
   for (const s of workflow.steps) {
-    lines.push(`  ${s.id}: ${s.agent}${s.model ? ` (${s.model})` : ""}, ${s.inPlace ? "WRITES DIRECTLY IN CHECKOUT" : s.workspace ? `writes in ${s.workspace}'s workspace of` : s.policy === "workspace-write" ? "writes in a new git worktree of" : "read-only on"} ${s.cwd}` +
+    if (s.agent === "command") {
+      lines.push(`  ${s.id}: command \`${s.command!.join(" ")}\` on ${s.host ? `host ${s.host.join(" or ")}` : "this machine"}, reading a frozen copy of ${s.workspace ? `${s.workspace}'s worktree` : s.cwd}` +
+        `${s.dependsOn.length ? `, after ${s.dependsOn.join(", ")}` : ""}${s.artifacts?.length ? `, brings back ${s.artifacts.join(", ")}` : ""}`);
+      continue;
+    }
+    lines.push(`  ${s.id}: ${s.agent}${s.model ? ` (${s.model})` : ""}${s.host ? ` on host ${s.host.join(" or ")}` : ""}, ${s.inPlace ? "WRITES DIRECTLY IN CHECKOUT" : s.workspace ? `writes in ${s.workspace}'s workspace of` : s.policy === "workspace-write" ? "writes in a new git worktree of" : "read-only on"} ${s.cwd}` +
       `${s.reuseSession ? `, continues session from ${s.reuseSession}` : ""}${s.dependsOn.length ? `, after ${s.dependsOn.join(", ")}` : ""}` +
       `${s.when ? `, only if ${Object.entries(s.when).map(([d, f]) => `${d} ${Object.entries(f).map(([k, v]) => `${k}=${v}`).join(" ")}`).join(" and ")}` : ""}` +
       `${s.expect ? `, must report ${Object.entries(s.expect).map(([k, v]) => `${k}=${v}`).join(" ")}` : ""}`);
@@ -33,7 +39,7 @@ export class Progress {
   private busy = false;
   private input?: ReturnType<typeof createInterface>;
 
-  constructor(private run: Run, private runtime: TmuxRuntime, private mode: ProgressMode,
+  constructor(private run: Run, private runtime: PromptRuntime, private mode: ProgressMode,
     private write: (line: string) => void = line => process.stderr.write(line + "\n"), private interactive = Boolean(process.stdin.isTTY)) {
     // A resumed run starts from its recorded state; only later changes are reported.
     for (const [id, s] of Object.entries(run.steps)) this.status.set(id, s.status);
@@ -71,13 +77,13 @@ export class Progress {
           this.status.set(step.id, s.status); this.changedAt = Date.now();
           this.prompts.delete(step.id);
           const result = s.result as { summary?: unknown } | undefined;
-          const detail = s.status === "running" ? "accepted the task" : ["done", "failed", "blocked"].includes(s.status) && result?.summary ? String(result.summary).slice(0, 160)
+          const detail = s.status === "running" ? (step.agent === "command" ? `started on ${s.host ?? "this machine"}` : `accepted the task${s.host ? ` on ${s.host}` : ""}`) : ["done", "failed", "blocked"].includes(s.status) && result?.summary ? String(result.summary).slice(0, 160)
             : s.error ? s.error : "";
           this.emit({ type: "step", step: step.id, agent: step.agent, status: s.status, ...(detail ? { detail } : {}) },
             `${step.id} (${step.agent}): ${s.status}${detail ? ` — ${detail}` : ""}`);
         }
         // Trust/login prompts come before acceptance, tool approvals after it.
-        if (["starting", "running"].includes(s.status) && this.mode !== "none") {
+        if (["starting", "running"].includes(s.status) && this.mode !== "none" && step.agent !== "command") {
           const menu = await this.runtime.waitingOnPrompt(this.run, step.id);
           const recent = this.answered.get(step.id);
           if (menu && recent?.id === menu.id && Date.now() - recent.at < 5000) continue;

@@ -12,7 +12,9 @@ function context() {
   const run = loadRun(id), state = run.steps[stepId];
   if (!state || token.length !== state.token.length || !timingSafeEqual(Buffer.from(token), Buffer.from(state.token))) throw new Error("invalid worker capability");
   if (["pending", "dispatching", "cancelled"].includes(state.status)) throw new Error("step is not eligible to execute");
-  const step = run.workflow.steps.find(s => s.id === stepId)!;
+  const found = run.workflow.steps.find(s => s.id === stepId)!;
+  if (found.agent === "command") throw new Error("command steps have no worker");
+  const step = { ...found, agent: found.agent };
   return { run, state, step, stepId, token };
 }
 export async function workerTask(transport: Transport) {

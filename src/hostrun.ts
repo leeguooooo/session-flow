@@ -1,0 +1,397 @@
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
+import { dirname, join } from "node:path";
+import { checked } from "./process";
+import { saveRun } from "./store";
+import { sessionRoot, workspaceRoot } from "./config";
+import { candidates, LocalLink, SshLink, unfit, type Hello, type Link } from "./hosts";
+import { freeze, push, type Frozen } from "./gitsync";
+import { resultFile, storeResult } from "./results";
+import { parseBody } from "./engine";
+import { safeRelative } from "./remote";
+import type { Menu } from "./prompt";
+import { diagnoseScreen, parseMenu } from "./prompt";
+import type { Message, Run, SessionRuntime, Step, TaskEvent, WorkerEvent } from "./types";
+import type { TmuxRuntime } from "./runtime";
+
+const POLL_MS = Number(process.env.SFLOW_POLL_MS ?? 3000);
+type Outcome = { ok: true } | { wait: string } | { error: string };
+
+// Steps placed on other machines, and command steps anywhere. Local agent steps go to tmux unchanged.
+export class HostRouter implements SessionRuntime {
+  private links = new Map<string, Link>();
+  private hellos = new Map<string, { at: number; hello?: Hello; error?: string }>();
+  private polled = new Map<string, number>();
+  constructor(readonly local: TmuxRuntime, readonly cli: string[]) {}
+  get binary() { return this.local.binary; }
+
+  link(run: Run, name: string): Link {
+    const key = `${run.id}:${name}`;
+    let l = this.links.get(key);
+    if (!l) {
+      if (name === "local") l = new LocalLink(this.cli);
+      else {
+        const config = run.hosts?.[name];
+        if (!config) throw new Error(`host ${name} is not frozen in this run`);
+        l = new SshLink(name, config);
+      }
+      this.links.set(key, l);
+    }
+    return l;
+  }
+  async probe(run: Run, name: string): Promise<{ hello?: Hello; error?: string }> {
+    const cached = this.hellos.get(name);
+    if (cached && Date.now() - cached.at < 10_000) return cached;
+    let entry: { at: number; hello?: Hello; error?: string };
+    try {
+      const hello = await this.link(run, name).call<Hello>("hello", {}, 20_000);
+      const why = name === "local" ? null : unfit(name, run.hosts![name], hello);
+      entry = { at: Date.now(), hello, ...(why ? { error: why } : {}) };
+    } catch (e) { entry = { at: Date.now(), error: (e as Error).message }; }
+    this.hellos.set(name, entry); return entry;
+  }
+  // Fit hosts first, least loaded per core; the rest with their reasons.
+  private async ranked(run: Run, step: Step, need?: string) {
+    const names = candidates(step.host!, run.hosts ?? {});
+    const fit: { name: string; hello: Hello }[] = [], reasons: string[] = [];
+    let hard = 0;
+    for (const name of names) {
+      const p = await this.probe(run, name);
+      if (p.hello && need && !p.hello.tools[need]) { reasons.push(`${name} has no ${need}`); hard++; continue; }
+      if (p.error || !p.hello) { reasons.push(p.error ?? `${name}: no answer`); if (!p.hello || p.error?.includes("protocol")) hard++; continue; }
+      fit.push({ name, hello: p.hello });
+    }
+    fit.sort((a, b) => a.hello.load / a.hello.cpus - b.hello.load / b.hello.cpus);
+    return { fit, reasons, allHard: hard === names.length };
+  }
+  private objects(run: Run) { return join(run.dir, "objects"); }
+  private async send(run: Run, link: Link, frozen: Frozen, commit: string, ref: string) {
+    const { path } = await link.call<{ path: string }>("repo", { repo: frozen.repo });
+    await push(frozen.root, this.objects(run), link.gitUrl(path), commit, ref, link.gitEnv());
+  }
+  // What a reader on another machine sees: the files of a checkout or worktree, frozen now.
+  private async freezeLocal(run: Run, cwd: string) { return freeze(cwd, this.objects(run)); }
+  private hostOf(run: Run, step: Step): string | undefined {
+    // Chains stay where they started.
+    const anchor = step.reuseSession ? sessionRoot(run.workflow.steps, step) : step.workspace ? workspaceRoot(run.workflow.steps, step) : undefined;
+    return anchor && anchor !== step.id ? run.steps[anchor].host : run.steps[step.id].host;
+  }
+  remoteStep(run: Run, id: string): boolean {
+    const s = run.steps[id], step = run.workflow.steps.find(x => x.id === id)!;
+    return step.agent !== "command" && !!s.host && s.host !== "local";
+  }
+
+  // ---- agent steps on a host ----
+  async placeAgent(run: Run, step: Step): Promise<Outcome> {
+    const s = run.steps[step.id];
+    const fixed = this.hostOf(run, step);
+    const tries = fixed ? [fixed] : s.host ? [s.host] : null;
+    let names: string[], reasons: string[] = [], allHard = false;
+    if (tries) names = tries;
+    else { const r = await this.ranked(run, step, step.agent); names = r.fit.map(f => f.name); reasons = r.reasons; allHard = r.allHard; }
+    for (const name of names) {
+      s.host = name; saveRun(run);
+      try {
+        const r = await this.prepare(run, step, name);
+        if (r === "ready") return { ok: true };
+        reasons.push(`${name} has no free slot`);
+      } catch (e) {
+        reasons.push((e as Error).message);
+        await this.link(run, name).call("release", { runId: run.id, root: sessionRoot(run.workflow.steps, step) }).catch(() => {});
+        if (tries) { s.error = `preparing on ${name} failed: ${(e as Error).message}`; return { error: s.error }; }
+      }
+      if (!tries) { delete s.host; delete s.remote; saveRun(run); }
+    }
+    if (tries) return { wait: reasons.join("; ") };
+    return allHard ? { error: `no host can run this step: ${reasons.join("; ")}` } : { wait: reasons.join("; ") || "no host available" };
+  }
+  private mirror(run: Run, name: string, step: Step) {
+    const ids = new Set([step.id, ...run.workflow.steps.filter(x => run.steps[x.id].host === name && run.steps[x.id].remote).map(x => x.id)]);
+    const steps = run.workflow.steps.filter(x => ids.has(x.id)).map(x => {
+      const { host: _h, ...rest } = x;
+      const writeRoot = x.policy === "workspace-write" && x.workspace === undefined;
+      return writeRoot ? { ...rest, worktree: undefined, inPlace: true } : rest;
+    });
+    return { version: run.version, id: run.id, channel: run.channel, createdAt: run.createdAt, status: "running",
+      workflow: { ...run.workflow, steps },
+      steps: Object.fromEntries([...ids].map(id => [id, { status: "starting", token: run.steps[id].token, session: run.steps[id].session,
+        ...(run.steps[id].actor ? { actor: run.steps[id].actor } : {}) }])) };
+  }
+  private async prepare(run: Run, step: Step, name: string): Promise<"ready" | "busy"> {
+    const link = this.link(run, name), s = run.steps[step.id];
+    const checkouts: Record<string, unknown>[] = [];
+    let base: string | undefined;
+    if (step.policy === "workspace-write" && step.workspace === undefined) {
+      // A write step starts from HEAD, as a local worktree does.
+      const frozen = await this.freezeLocal(run, step.cwd);
+      base = frozen.head;
+      const tree = (await checked(["git", "-C", frozen.root, "rev-parse", `${base}^{tree}`])).trim();
+      await this.send(run, link, frozen, base, `refs/sflow/${run.id}/${step.id}-base`);
+      checkouts.push({ repo: frozen.repo, commit: base, tree, name: step.id, branch: `sflow/${run.id}/${step.id}`, local: step.cwd });
+    } else if (step.policy === "read-only") {
+      const frozen = await this.freezeLocal(run, step.cwd);
+      await this.send(run, link, frozen, frozen.commit, `refs/sflow/${run.id}/${step.id}`);
+      checkouts.push({ repo: frozen.repo, commit: frozen.commit, tree: frozen.tree, name: step.id, local: step.cwd });
+      // Worktrees earlier write steps left on the driver, so dependency paths resolve there too.
+      for (const anc of ancestors(run, step)) {
+        const wt = join(run.dir, anc, "worktree");
+        if (!existsSync(wt)) continue;
+        const f = await this.freezeLocal(run, wt);
+        await this.send(run, link, f, f.commit, `refs/sflow/${run.id}/${step.id}-${anc}`);
+        checkouts.push({ repo: f.repo, commit: f.commit, tree: f.tree, name: `${step.id}-${anc}`, local: wt });
+      }
+    }
+    const r = await link.call<{ state: string; dir: string; cwd: string; pathMap: Record<string, string> }>("prepare",
+      { run: this.mirror(run, name, step), stepId: step.id, slots: run.hosts![name].slots, checkouts, driver: hostname() }, 900_000);
+    if (r.state !== "ready") return "busy";
+    s.remote = { dir: r.dir, cwd: r.cwd, pathMap: { [run.dir]: r.dir, ...r.pathMap }, ...(base ? { base } : {}) };
+    saveRun(run); return "ready";
+  }
+  // The assignment as the remote worker must read it: its paths, and copies of the result files it names.
+  async remoteTask(run: Run, step: Step, task: TaskEvent): Promise<TaskEvent> {
+    const s = run.steps[step.id], link = this.link(run, s.host!);
+    const root = run.workflow.steps.find(x => x.id === workspaceRoot(run.workflow.steps, step))!;
+    const workspace = step.policy === "workspace-write" ? run.steps[root.id].remote?.cwd ?? s.remote!.cwd! : s.remote!.cwd!;
+    const files: { name: string; base64: string; sha256: string; local: string }[] = [];
+    const upload = (path: string) => {
+      const body = readFileSync(path), name = path.split("/").pop()!;
+      files.push({ name, base64: body.toString("base64"), sha256: createHash("sha256").update(body).digest("hex"), local: path });
+    };
+    const refs: Record<string, unknown>[] = [];
+    for (const dep of Object.values(task.dependencies)) if (typeof dep.resultFile === "string") { upload(dep.resultFile); refs.push(dep); }
+    let manifest: Record<string, any> | undefined;
+    if (task.dependencyManifest) {
+      manifest = JSON.parse(readFileSync(task.dependencyManifest.path, "utf8"));
+      for (const v of Object.values(manifest!)) if (typeof v?.resultFile === "string") upload(v.resultFile);
+    }
+    const { paths } = files.length ? await link.call<{ paths: Record<string, string> }>("put", { runId: run.id, files: files.map(({ local: _, ...f }) => f) }) : { paths: {} };
+    const moved = (p: string) => paths[p.split("/").pop()!] ?? p;
+    const out: TaskEvent = { ...task, workspace, pathMap: s.remote?.pathMap };
+    delete out.workspaceObservation;
+    out.dependencies = Object.fromEntries(Object.entries(task.dependencies).map(([k, v]) => [k, typeof v.resultFile === "string" ? { ...v, resultFile: moved(v.resultFile) } : v]));
+    if (manifest) {
+      const body = JSON.stringify(Object.fromEntries(Object.entries(manifest).map(([k, v]) => [k, typeof v?.resultFile === "string" ? { ...v, resultFile: moved(v.resultFile) } : v]))) + "\n";
+      const b = Buffer.from(body), name = `${step.id}-dependencies.json`, sha256 = createHash("sha256").update(b).digest("hex");
+      const r = await link.call<{ paths: Record<string, string> }>("put", { runId: run.id, files: [{ name, base64: b.toString("base64"), sha256 }] });
+      out.dependencyManifest = { path: r.paths[name], sha256, count: task.dependencyManifest!.count };
+    }
+    return out;
+  }
+  async sendTask(run: Run, step: Step, task: TaskEvent) {
+    await this.link(run, run.steps[step.id].host!).call("send", { runId: run.id, body: await this.remoteTask(run, step, task) });
+  }
+  // Each host's channel, tagged; terminal results are copied next to local ones and hash-checked.
+  async remoteRows(run: Run): Promise<Message[]> {
+    const hosts = new Set(run.workflow.steps.filter(x => this.remoteStep(run, x.id) && run.steps[x.id].remote).map(x => run.steps[x.id].host!));
+    const rows: Message[] = [];
+    for (const name of hosts) {
+      const link = this.link(run, name);
+      const got = await link.call<Message[]>("read", { runId: run.id });
+      for (const row of got) {
+        rows.push({ ...row, host: name });
+        const e = parseBody(row) as WorkerEvent | null;
+        const ref = e?.result as Record<string, unknown> | undefined;
+        if (!e || e.type !== "sflow.worker" || e.runId !== run.id || !run.steps[e.stepId] || run.steps[e.stepId].host !== name) continue;
+        if (!ref || typeof ref.fullResultFile !== "string" || typeof ref.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(ref.sha256)) continue;
+        const local = resultFile(run, e.stepId, ref.sha256);
+        if (existsSync(local)) continue;
+        mkdirSync(dirname(local), { recursive: true, mode: 0o700 });
+        const temp = `${local}.fetch`;
+        try {
+          await link.fetch("file", { runId: run.id, path: ref.fullResultFile }, temp, 60_000);
+          const body = readFileSync(temp);
+          if (body.length <= 128 * 1024 && createHash("sha256").update(body).digest("hex") === ref.sha256) writeFileSync(local, body, { mode: 0o600 });
+        } catch {} finally { rmSync(temp, { force: true }); }
+      }
+    }
+    return rows;
+  }
+  // A remote write step's changes, as uncommitted edits in the run-owned local worktree.
+  async materialize(run: Run, step: Step) {
+    const s = run.steps[step.id];
+    if (!this.remoteStep(run, step.id) || step.policy !== "workspace-write" || !s.result || s.remote?.materialized) return;
+    const rootId = workspaceRoot(run.workflow.steps, step), root = run.workflow.steps.find(x => x.id === rootId)!;
+    const base = run.steps[rootId].remote?.base;
+    if (!base) throw new Error("remote write step has no recorded base commit");
+    const patch = join(run.dir, step.id, "remote.patch");
+    mkdirSync(dirname(patch), { recursive: true, mode: 0o700 });
+    await this.link(run, s.host!).fetch("patch", { runId: run.id, stepId: step.id, base }, patch, 600_000);
+    const wt = join(run.dir, rootId, "worktree");
+    if (existsSync(wt)) { await checked(["git", "-C", root.cwd, "worktree", "remove", "--force", wt]); }
+    await checked(["git", "-C", root.cwd, "worktree", "add", "--quiet", "-B", `sflow/${run.id}/${rootId}`, wt, base]);
+    if (lstatSync(patch).size) await checked(["git", "-C", wt, "apply", "--binary", "--whitespace=nowarn", patch], { timeoutMs: 300_000 });
+    s.remote = { ...s.remote!, materialized: true };
+    if (rootId !== step.id) run.steps[rootId].cwd = wt;
+    s.cwd = wt; saveRun(run);
+  }
+  async finish(run: Run) {
+    const hosts = new Set(Object.values(run.steps).filter(s => s.remote && s.host && s.host !== "local").map(s => s.host!));
+    for (const name of hosts) await this.link(run, name).call("cleanup", { runId: run.id }, 600_000).catch(() => {});
+  }
+
+  // ---- SessionRuntime, routed ----
+  async create(run: Run, step: Step) {
+    if (!this.remoteStep(run, step.id)) return this.local.create(run, step);
+    const r = await this.link(run, run.steps[step.id].host!).call<{ cwd: string }>("rt", { runId: run.id, stepId: step.id, action: "create" }, 900_000);
+    run.steps[step.id].cwd = r.cwd;
+  }
+  async continue(run: Run, step: Step) {
+    if (!this.remoteStep(run, step.id)) return this.local.continue(run, step);
+    const link = this.link(run, run.steps[step.id].host!), prev = run.steps[step.reuseSession!];
+    await link.call("step", { runId: run.id, stepId: step.reuseSession, state: { status: prev.status, actor: prev.actor, result: prev.result } });
+    await link.call("rt", { runId: run.id, stepId: step.id, action: "continue" });
+  }
+  async exists(run: Run, id: string) {
+    const step = run.workflow.steps.find(x => x.id === id)!;
+    if (step.agent === "command") return false;
+    if (!this.remoteStep(run, id)) return this.local.exists(run, id);
+    if (!run.steps[id].remote) return false;
+    return (await this.link(run, run.steps[id].host!).call<{ exists: boolean }>("rt", { runId: run.id, stepId: id, action: "exists" })).exists;
+  }
+  async stop(run: Run, id: string) {
+    const step = run.workflow.steps.find(x => x.id === id)!;
+    if (step.agent === "command") return this.cancelCommand(run, step, "cancelled");
+    if (!this.remoteStep(run, id)) return this.local.stop(run, id);
+    if (!run.steps[id].remote) return;
+    await this.link(run, run.steps[id].host!).call("rt", { runId: run.id, stepId: id, action: "stop" });
+  }
+  async screen(run: Run, id: string): Promise<string> {
+    if (!this.remoteStep(run, id)) return this.local.screen(run, id);
+    return (await this.link(run, run.steps[id].host!).call<{ screen: string }>("rt", { runId: run.id, stepId: id, action: "screen" })).screen;
+  }
+  async keys(run: Run, id: string, keys: string[]) {
+    if (!this.remoteStep(run, id)) return this.local.keys(run, id, keys);
+    await this.link(run, run.steps[id].host!).call("rt", { runId: run.id, stepId: id, action: "keys", keys });
+  }
+  async waitingOnPrompt(run: Run, id: string): Promise<Menu | null> {
+    try { return parseMenu(await this.screen(run, id)); } catch { return null; }
+  }
+  async diagnose(run: Run, id: string) {
+    try { return diagnoseScreen(await this.screen(run, id)); } catch { return null; }
+  }
+  attachArgs(run: Run, id: string): string[] {
+    if (!this.remoteStep(run, id)) return this.local.attachArgs(run, id);
+    const link = this.link(run, run.steps[id].host!) as SshLink;
+    const bin = link.config.bin.startsWith("~/") ? `"$HOME"/${link.config.bin.slice(2)}` : link.config.bin;
+    return [process.env.SFLOW_SSH_BIN ?? "ssh", "-t", link.config.ssh, `${bin} remote attach ${run.id} ${id}`];
+  }
+
+  // ---- command steps: a job journal on a host (or this machine) ----
+  async startCommand(run: Run, step: Step): Promise<Outcome> {
+    const s = run.steps[step.id];
+    s.job ??= { id: `${run.id}-${step.id}`, phase: "placing" };
+    if (!s.job.commit) {
+      const source = step.workspace !== undefined ? join(run.dir, workspaceRoot(run.workflow.steps, step), "worktree") : step.cwd;
+      const f = await this.freezeLocal(run, source);
+      Object.assign(s.job, { commit: f.commit, tree: f.tree, head: f.head, repo: f.repo, source: f.root });
+      saveRun(run);
+    }
+    const job = s.job;
+    let names: string[], reasons: string[] = [], allHard = false;
+    if (s.host && job.phase !== "placing") names = [s.host];
+    else if (!step.host) names = ["local"];
+    else { const r = await this.ranked(run, step); names = r.fit.map(f => f.name); reasons = r.reasons; allHard = r.allHard; }
+    for (const name of names) {
+      const link = this.link(run, name);
+      s.host = name;
+      if (job.phase === "placing" || job.phase === "sending") {
+        job.phase = "sending"; saveRun(run);
+        try { await this.send(run, link, { root: job.source!, repo: job.repo! } as Frozen, job.commit!, `refs/sflow/jobs/${job.id}`); }
+        catch (e) { reasons.push(`${name}: sending code failed: ${(e as Error).message}`); job.phase = "placing"; delete s.host; saveRun(run); continue; }
+      }
+      job.phase = "starting"; saveRun(run);
+      let state: string;
+      try {
+        state = (await link.call<{ state: string }>("job-start", { jobId: job.id, repo: job.repo, commit: job.commit, tree: job.tree,
+          argv: step.command, artifacts: step.artifacts ?? [], slots: name === "local" ? run.workflow.concurrency : run.hosts![name].slots }, 120_000)).state;
+      } catch (e) {
+        // The host may have claimed the job; only its own record can say.
+        const st = await link.call<{ state: string }>("job-status", { jobId: job.id }).catch(() => ({ state: "unknown" }));
+        if (st.state === "missing" || st.state === "unknown") {
+          s.status = "uncertain"; s.uncertainty = "launch"; s.error = `starting the job on ${name} had an unknown outcome (${(e as Error).message}); it is never started again automatically`;
+          saveRun(run); return { error: s.error };
+        }
+        state = "exists";
+      }
+      if (state === "busy") { reasons.push(`${name} has no free slot`); job.phase = "placing"; delete s.host; saveRun(run); continue; }
+      job.phase = "running"; s.status = "running"; s.lifecycle = "active"; s.actor = `job@${name}`; saveRun(run);
+      return { ok: true };
+    }
+    if (names.length === 1 && names[0] === s.host) return { wait: reasons.join("; ") };
+    return allHard ? { error: `no host can run this command: ${reasons.join("; ")}` } : { wait: reasons.join("; ") || "no host available" };
+  }
+  async pollCommand(run: Run, step: Step) {
+    const s = run.steps[step.id], job = s.job!;
+    if (job.phase !== "running" && job.phase !== "exited") return;
+    if (Date.now() - (this.polled.get(job.id) ?? 0) < POLL_MS) return;
+    this.polled.set(job.id, Date.now());
+    const link = this.link(run, s.host!);
+    let st: any;
+    try { st = await link.call("job-status", { jobId: job.id }); }
+    catch (e) { s.error = `cannot reach ${s.host}: ${(e as Error).message}; the job keeps running there`; saveRun(run); return; }
+    if (s.error?.startsWith("cannot reach")) delete s.error;
+    if (st.state === "missing" || st.state === "lost") {
+      s.status = "uncertain"; s.uncertainty = "worker"; s.error = st.state === "missing" ? `job ${job.id} is not on ${s.host}` : `${st.error} on ${s.host}`; saveRun(run); return;
+    }
+    if (st.state !== "exited") {
+      if (Date.now() - (s.startedAt ?? Date.now()) > step.timeoutSeconds * 1000 && !st.cancel) {
+        await link.call("job-cancel", { jobId: job.id, reason: "timeout" }).catch(() => {});
+        s.error = `timed out after ${step.timeoutSeconds}s; cancellation sent to ${s.host}`; saveRun(run);
+      }
+      return;
+    }
+    job.phase = "exited"; saveRun(run);
+    await this.collect(run, step, link, st);
+  }
+  private async collect(run: Run, step: Step, link: Link, st: any) {
+    const s = run.steps[step.id], job = s.job!, dir = join(run.dir, step.id);
+    mkdirSync(join(dir, "artifacts"), { recursive: true, mode: 0o700 });
+    const log = join(dir, "log.txt");
+    await link.fetch("job-file", { jobId: job.id, kind: "log" }, log).catch(() => writeFileSync(log, ""));
+    const problems: string[] = [...(st.artifacts?.missing ?? []).map((m: { path: string; error: string }) => `${m.path}: ${m.error}`)];
+    const artifacts: Record<string, unknown>[] = [];
+    for (const a of (st.artifacts?.files ?? []) as { path: string; sha256: string; bytes: number }[]) {
+      if (!safeRelative(a.path)) { problems.push(`${a.path}: unsafe path`); continue; }
+      const local = join(dir, "artifacts", a.path);
+      mkdirSync(dirname(local), { recursive: true, mode: 0o700 });
+      try { await link.fetch("job-file", { jobId: job.id, kind: "artifact", path: a.path }, local); }
+      catch (e) { problems.push(`${a.path}: ${(e as Error).message}`); continue; }
+      const sha = createHash("sha256").update(readFileSync(local)).digest("hex");
+      if (sha !== a.sha256) { problems.push(`${a.path}: hash mismatch after transfer`); continue; }
+      artifacts.push({ path: local, sha256: sha, bytes: a.bytes });
+    }
+    const exit = st.exit ?? {};
+    const tail = readFileSync(log, "utf8").split("\n").slice(-30).join("\n").slice(-4000);
+    const argv = step.command!.join(" ");
+    const how = exit.error ? exit.error : exit.signal ? `killed by ${exit.signal}` : `exit ${exit.code}`;
+    const status = exit.code === 0 && !problems.length ? "done" : exit.code === 0 ? "blocked" : "failed";
+    const receipt = {
+      status, summary: `${argv} on ${s.host}: ${how}${problems.length ? `; artifacts: ${problems.join(", ")}` : ""}`,
+      checks: [`${argv} → ${how}`], artifacts: [log, ...artifacts.map(a => a.path as string)],
+      details: { host: s.host, jobId: job.id, inputCommit: job.commit, inputTree: job.tree, inputHead: job.head,
+        argvSha256: createHash("sha256").update(JSON.stringify(step.command)).digest("hex"),
+        exitCode: exit.code ?? null, signal: exit.signal ?? null, ...(exit.error ? { error: exit.error } : {}),
+        arch: st.started?.arch, platform: st.started?.platform, machine: st.started?.host,
+        startedAt: st.started?.startedAt, finishedAt: exit.finishedAt, ...(st.cancel ? { cancelled: st.cancel.reason } : {}),
+        log: { path: log, sha256: createHash("sha256").update(readFileSync(log)).digest("hex") }, artifactFiles: artifacts, ...(problems.length ? { artifactProblems: problems } : {}),
+        logTail: tail },
+    };
+    s.result = storeResult(run, step.id, receipt);
+    s.status = st.cancel?.reason === "timeout" ? "blocked" : status as "done";
+    if (st.cancel?.reason === "timeout") s.error = `timed out after ${step.timeoutSeconds}s; the job was cancelled`;
+    else if (status !== "done") s.error = receipt.summary; else delete s.error;
+    s.finishedAt = exit.finishedAt ?? Date.now(); s.lifecycle = "closed"; job.phase = "collected"; job.receipt = { status, exitCode: exit.code ?? null };
+    saveRun(run);
+  }
+  async cancelCommand(run: Run, step: Step, reason: string) {
+    const s = run.steps[step.id];
+    if (!s.job || !s.host || !["starting", "running"].includes(s.job.phase)) return;
+    try { await this.link(run, s.host).call("job-cancel", { jobId: s.job.id, reason }); }
+    catch (e) { s.error = `cancellation on ${s.host} unknown: ${(e as Error).message}`; saveRun(run); }
+  }
+}
+function ancestors(run: Run, step: Step, seen = new Set<string>()): string[] {
+  for (const d of step.dependsOn) if (!seen.has(d)) { seen.add(d); ancestors(run, run.workflow.steps.find(x => x.id === d)!, seen); }
+  return [...seen];
+}

@@ -201,7 +201,7 @@ export function createTemplate(name: string, from: string, cwd: string, scope: "
       for (const step of wf.steps) { const rel = relative(root, realpathSync(step.cwd)); if (isAbsolute(rel) || rel.split(sep).includes("..")) throw new Error("imported workflow cwd must be within --cwd; choose the correct project root"); }
       const roles: Record<string, Role> = {};
       value = { version: 1, kind: "sflow-template", name, params: {}, concurrency: wf.concurrency, prefixWarmupMs: wf.prefixWarmupMs,
-        roles, steps: wf.steps.map(s => { roles[s.id] = { agent: s.agent, ...(s.model ? { model: s.model } : {}) }; const { agent: _, model: __, ...step } = s; return { ...step, cwd: relative(root, realpathSync(s.cwd)) || ".", role: s.id }; }) };
+        roles, steps: wf.steps.map(s => { if (s.agent === "command" || s.host) throw new Error(`${s.id}: templates do not carry command steps or hosts yet; run the workflow file directly`); roles[s.id] = { agent: s.agent, ...(s.model ? { model: s.model } : {}) }; const { agent: _, model: __, ...step } = s; return { ...step, cwd: relative(root, realpathSync(s.cwd)) || ".", role: s.id }; }) };
     }
   } else value = locateTemplate(from, cwd).template;
   const template = parseTemplate({ ...obj(value, "template"), name });

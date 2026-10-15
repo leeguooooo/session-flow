@@ -88,7 +88,12 @@ function stale(owner: string): boolean {
 }
 // "held": this owner already had a slot (a retained session); "new": claimed now; false: none free.
 function claimLocked(owner: string, slots: number): "held" | "new" | false {
-  if (slotOwners().some(s => s.owner === owner)) return "held";
+  const mine = slotOwners().find(s => s.owner === owner);
+  if (mine) {
+    // A renewed claim restarts gc's grace period: the driver is using this slot again.
+    writeFileSync(join(slotsDir(), mine.slot, "owner.json"), JSON.stringify({ owner, since: Date.now() }), { mode: 0o600 });
+    return "held";
+  }
   for (let i = 0; i < slots; i++) {
     const path = join(slotsDir(), String(i));
     if (existsSync(path)) {

@@ -205,7 +205,10 @@ export class HostRouter implements SessionRuntime {
     return out;
   }
   async sendTask(run: Run, step: Step, task: TaskEvent) {
-    await this.link(run, run.steps[step.id].host!).call("send", { runId: run.id, body: await this.remoteTask(run, step, task) });
+    let body: TaskEvent;
+    // Before anything is sent the outcome is known: nothing reached the worker's channel.
+    try { body = await this.remoteTask(run, step, task); } catch (e) { throw new NotSent((e as Error).message); }
+    await this.link(run, run.steps[step.id].host!).call("send", { runId: run.id, body });
   }
   // Each host's channel, tagged; terminal results are copied next to local ones and hash-checked.
   async remoteRows(run: Run): Promise<Message[]> {
@@ -474,6 +477,7 @@ export class HostRouter implements SessionRuntime {
     catch (e) { s.error = `cancellation on ${s.host} unknown: ${(e as Error).message}`; saveRun(run); }
   }
 }
+export class NotSent extends Error { readonly notSent = true; }
 function ancestors(run: Run, step: Step, seen = new Set<string>()): string[] {
   for (const d of step.dependsOn) if (!seen.has(d)) { seen.add(d); ancestors(run, run.workflow.steps.find(x => x.id === d)!, seen); }
   return [...seen];

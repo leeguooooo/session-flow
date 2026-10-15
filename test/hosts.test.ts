@@ -654,3 +654,29 @@ test("a failed prepare for a continuation round never releases the retained work
   expect(calls).toContain("prepare");
   expect(calls).not.toContain("release");
 });
+
+test("an assignment that was never sent blocks the step and gives a first round's host slot back", async () => {
+  const run = setup([{ id: "r", agent: "codex", prompt: "x", host: "mini" }], { mini: host("mini") });
+  const { NotSent } = await import("../src/hostrun");
+  const stopped: string[] = [];
+  const rt: SessionRuntime = {
+    async create() { throw new Error("must not create"); }, async exists() { return false; },
+    async stop(_r: Run, id: string) { stopped.push(id); },
+    remoteStep: () => true,
+    async placeAgent(r: Run, st: Step) { r.steps[st.id].host = "mini"; r.steps[st.id].remote = { dir: "/r", cwd: "/r/c" }; return { ok: true as const }; },
+    async sendTask() { throw new NotSent("evidence upload failed"); },
+  };
+  await tick(run, rt, new NoTransport());
+  expect(run.steps.r.status as string).toBe("blocked");
+  expect(run.steps.r.error).toContain("assignment not sent");
+  expect(stopped).toContain("r");
+});
+
+test("claiming a slot the owner already holds renews its time", async () => {
+  process.env.SFLOW_HOME = join(base, "solo");
+  expect(await claimSlot("step:x:a", 1)).toBe("new");
+  const f = join(base, "solo", "slots", "0", "owner.json");
+  writeFileSync(f, JSON.stringify({ owner: "step:x:a", since: 1 }));
+  expect(await claimSlot("step:x:a", 1)).toBe("held");
+  expect(Date.now() - JSON.parse(readFileSync(f, "utf8")).since).toBeLessThan(10_000);
+});

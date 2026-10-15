@@ -246,7 +246,15 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
         s.status = "failed"; s.error = "assignment exceeds OCS message limit; shorten prompt or dependency fan-in"; saveRun(run); continue;
       }
       try { if (runtime.remoteStep?.(run, step.id)) await runtime.sendTask!(run, step, task); else await transport.send(run.channel, task, sender); }
-      catch (e) { s.status = "uncertain"; s.uncertainty = "dispatch"; s.error = String(e); saveRun(run); continue; }
+      catch (e) {
+        if ((e as { notSent?: boolean }).notSent) {
+          // Nothing was sent: the step blocks with its reason, and a first round gives its host slot back.
+          s.status = "blocked"; s.error = `assignment not sent: ${(e as Error).message}`; saveRun(run);
+          if (!step.reuseSession) await runtime.stop(run, step.id).catch(() => {});
+          continue;
+        }
+        s.status = "uncertain"; s.uncertainty = "dispatch"; s.error = String(e); saveRun(run); continue;
+      }
     }
     s.status = "launching"; s.startedAt = Date.now(); s.prefixGroup = group; saveRun(run);
     try {

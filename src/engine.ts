@@ -4,9 +4,9 @@ import { saveRun } from "./store";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { buildTask, prefixGroup } from "./context";
-import { resolveResult } from "./results";
+import { resolveResult, resultFile } from "./results";
 import { nativeActor, validProof } from "./protocol";
-import type { Run, SessionRuntime, Step, Transport, TaskEvent, Message, WorkerEvent } from "./types";
+import type { Run, SessionRuntime, Step, StepState, Transport, TaskEvent, Message, WorkerEvent } from "./types";
 
 const active = new Set(["dispatching", "launching", "starting", "running"]);
 const terminal = new Set(["done", "failed", "blocked", "uncertain", "cancelled", "skipped"]);
@@ -39,13 +39,21 @@ export function isTask(value: unknown, run: Run, stepId: string): value is TaskE
   const e = value as TaskEvent | null;
   return !!e && e.type === "sflow.task" && e.version === 1 && e.runId === run.id && e.stepId === stepId;
 }
+// A step placed on another host reports only through that host's channel (sequence numbers are per machine).
+function fromItsHost(run: Run, row: Message, stepId: string): boolean {
+  const state = run.steps[stepId], step = run.workflow.steps.find(s => s.id === stepId);
+  const remote = !!state?.host && state.host !== "local" && step?.agent !== "command";
+  return remote ? row.host === state.host : row.host === undefined;
+}
 export function reconcile(run: Run, rows: Message[]) {
   for (const row of [...rows].sort((a, b) => a.seq - b.seq)) {
     const e = parseBody(row) as WorkerEvent | null;
     if (!e || e.type !== "sflow.worker" || e.version !== 1 || e.runId !== run.id) continue;
     const state = run.steps[e.stepId];
-    if (!state || !validProof(e, state.token) || row.from !== e.actor ||
-      !nativeActor(e.actor, run.workflow.steps.find(s => s.id === e.stepId)?.agent, { runId: run.id, stepId: e.stepId })) continue;
+    const agent = run.workflow.steps.find(s => s.id === e.stepId)?.agent;
+    // Command steps have no worker; sflow records their receipt itself.
+    if (!state || agent === "command" || !fromItsHost(run, row, e.stepId) || !validProof(e, state.token) || row.from !== e.actor ||
+      !nativeActor(e.actor, agent, { runId: run.id, stepId: e.stepId })) continue;
     if (state.actor && state.actor !== e.actor) continue;
     const definition = run.workflow.steps.find(s => s.id === e.stepId)!;
     if (definition.reuseSession && (run.steps[definition.reuseSession].status !== "done" || run.steps[definition.reuseSession].actor !== e.actor)) continue;
@@ -59,6 +67,8 @@ export function reconcile(run: Run, rows: Message[]) {
       if (!state.actor || !e.result || typeof e.result !== "object" || Array.isArray(e.result)) continue;
       if (["done", "failed", "blocked"].includes(state.status) && state.result) continue;
       let result: Record<string, unknown>;
+      // A remote report names the host's file; the driver checks and keeps its own copy.
+      if (row.host && typeof e.result.fullResultFile === "string" && typeof e.result.sha256 === "string") e.result = { ...e.result, fullResultFile: resultFile(run, e.stepId, e.result.sha256) };
       try { result = resolveResult(run, e.stepId, e.result); } catch {
         state.status = "blocked"; state.error = "terminal report evidence missing or corrupted; inspect result file/hash"; continue;
       }
@@ -70,6 +80,40 @@ export function reconcile(run: Run, rows: Message[]) {
     }
   }
 }
+// concurrency counts native sessions (one per reuse chain, live or retained) and running command jobs together.
+function commandsRunning(run: Run): number {
+  return run.workflow.steps.filter(x => x.agent === "command" && (active.has(run.steps[x.id].status) || (run.steps[x.id].status === "uncertain" && run.steps[x.id].job))).length;
+}
+// Live native sessions, one per reuse chain. Sessions no step can use any more are stopped first,
+// so a finished worker never holds a slot that a later agent or command step needs.
+async function occupancy(run: Run, runtime: SessionRuntime): Promise<number> {
+  const groups = new Map<string, Step[]>();
+  for (const member of run.workflow.steps.filter(x => x.agent !== "command")) {
+    const root = sessionRoot(run.workflow.steps, member);
+    groups.set(root, [...(groups.get(root) ?? []), member]);
+  }
+  let occupied = 0;
+  for (const members of groups.values()) {
+    const owner = members.find(m => run.steps[m.id].lifecycle === "active") ?? members[0];
+    const live = await runtime.exists(run, owner.id);
+    const needsLater = members.some(m => run.steps[m.id].status === "pending");
+    const busy = members.some(m => active.has(run.steps[m.id].status) || ["blocked", "uncertain", "failed"].includes(run.steps[m.id].status));
+    if (live && !busy && !needsLater) {
+      await runtime.stop(run, owner.id);
+      for (const m of members) run.steps[m.id].lifecycle = "closed";
+    } else if (live) {
+      occupied++;
+      if (!busy) for (const m of members.filter(m => finished(run.steps[m.id].status))) run.steps[m.id].lifecycle = "retained";
+    }
+  }
+  return occupied;
+}
+// Nothing can free a slot: every one is held by a retained, blocked or uncertain worker or job.
+function stuck(run: Run, s: StepState) {
+  if (Object.values(run.steps).some(x => active.has(x.status))) return false;
+  s.status = "blocked"; s.error = "retained/blocked workers or jobs fill concurrency slots; inspect them and use higher concurrency in a new workflow"; saveRun(run);
+  return true;
+}
 export async function tick(run: Run, runtime: SessionRuntime, transport: Transport) {
   if (existsSync(join(run.dir, "cancel.request"))) {
     for (const step of run.workflow.steps) {
@@ -80,16 +124,32 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
   }
   const sender = `sflow-${run.id}`;
   const rows = await transport.read(run.channel, sender);
+  if (runtime.remoteRows) {
+    // An unreachable host leaves its steps as they are; its reports are read on a later tick.
+    try { rows.push(...await runtime.remoteRows(run)); } catch {}
+  }
   reconcile(run, rows); saveRun(run);
   for (const step of run.workflow.steps) {
     try { await endObservation(run, step); }
     catch (e) { run.steps[step.id].status = "blocked"; run.steps[step.id].error = `workspace observation failed: ${String(e)}`; }
+    try { await runtime.materialize?.(run, step); }
+    catch (e) { run.steps[step.id].status = "blocked"; run.steps[step.id].error = `bringing the remote worktree back failed: ${String(e)}`; }
+    if (step.agent === "command" && run.steps[step.id].job && ["running"].includes(run.steps[step.id].status)) await runtime.pollCommand?.(run, step);
   }
   saveRun(run);
   for (const step of run.workflow.steps) {
     const s = run.steps[step.id];
     if (s.status === "blocked" && s.error === "dependency did not complete successfully" && step.dependsOn.every(id => finished(run.steps[id].status))) {
       s.status = "pending"; delete s.error; saveRun(run);
+    }
+    if (step.agent === "command") {
+      // A command job left mid-start is asked again by its job id; the host never starts it twice.
+      if (s.status === "launching" && s.job && s.job.phase !== "placing" && runtime.startCommand) {
+        const r = await runtime.startCommand(run, step);
+        if ("error" in r && s.status === "launching") { s.status = "blocked"; s.error = r.error; }
+        saveRun(run);
+      }
+      continue;
     }
     if (s.status === "launching" || (s.status === "uncertain" && s.uncertainty === "launch")) {
       // Crash between creating the process and recording success: adopting the
@@ -101,7 +161,7 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
       saveRun(run);
     }
     if (s.status === "dispatching" || (s.status === "uncertain" && s.uncertainty === "dispatch")) {
-      const assignments = rows.filter(r => r.from === sender && isTask(parseBody(r), run, step.id));
+      const assignments = rows.filter(r => r.from === sender && isTask(parseBody(r), run, step.id) && fromItsHost(run, r, step.id));
       if (assignments.length === 1) {
         // Assignment is committed, but a crash may have occurred before launch.
         // No launch was attempted until status=launching was durable.
@@ -139,38 +199,34 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
       if ("error" in decision) { s.status = "blocked"; s.error = decision.error; saveRun(run); continue; }
       if (!decision.run) { s.status = "skipped"; s.finishedAt = Date.now(); saveRun(run); continue; }
     }
+    if (step.agent === "command") {
+      if (await occupancy(run, runtime) + commandsRunning(run) >= run.workflow.concurrency) { stuck(run, s); continue; }
+      if (!runtime.startCommand) { s.status = "blocked"; s.error = "this runtime cannot run command steps"; saveRun(run); continue; }
+      s.status = "launching"; s.startedAt ??= Date.now(); saveRun(run);
+      let r: Awaited<ReturnType<NonNullable<SessionRuntime["startCommand"]>>>;
+      try { r = await runtime.startCommand(run, step); } catch (e) { r = { error: (e as Error).message }; }
+      if ("wait" in r) { s.status = "pending"; delete s.startedAt; s.error = `waiting for a host: ${r.wait}`; }
+      else if ("error" in r && s.status === "launching") { s.status = "blocked"; s.error = r.error; }
+      saveRun(run); continue;
+    }
     const group = prefixGroup(step);
     // Let the first matching worker begin its response before a sibling is
     // launched. This only enables compatible caching; it never claims a hit.
     if (group && Object.values(run.steps).some(other => other.prefixGroup === group && other.status === "starting" && Date.now() - (other.startedAt ?? 0) < (run.workflow.prefixWarmupMs ?? 0))) continue;
     // Stop only a whole worker group with no active or possible future round.
-    const groups = new Map<string, Step[]>();
-    for (const member of run.workflow.steps) {
-      const root = sessionRoot(run.workflow.steps, member);
-      groups.set(root, [...(groups.get(root) ?? []), member]);
-    }
-    let occupied = 0;
-    for (const members of groups.values()) {
-      const owner = members.find(m => run.steps[m.id].lifecycle === "active") ?? members[0];
-      const live = await runtime.exists(run, owner.id);
-      const needsLater = members.some(m => run.steps[m.id].status === "pending");
-      const busy = members.some(m => active.has(run.steps[m.id].status) || ["blocked", "uncertain", "failed"].includes(run.steps[m.id].status));
-      if (live && !busy && !needsLater) {
-        await runtime.stop(run, owner.id);
-        for (const m of members) run.steps[m.id].lifecycle = "closed";
-      } else if (live) {
-        occupied++;
-        if (!busy) for (const m of members.filter(m => finished(run.steps[m.id].status))) run.steps[m.id].lifecycle = "retained";
-      }
-    }
-    if (!step.reuseSession && occupied >= run.workflow.concurrency) {
-      if (!Object.values(run.steps).some(s => active.has(s.status))) {
-        s.status = "blocked"; s.error = "retained/blocked workers fill concurrency slots; inspect them and use higher concurrency in a new workflow"; saveRun(run);
-      }
-      continue;
-    }
+    const occupied = await occupancy(run, runtime);
+    if (!step.reuseSession && occupied + commandsRunning(run) >= run.workflow.concurrency) { stuck(run, s); continue; }
     if (step.reuseSession && run.steps[step.reuseSession].status !== "done") {
       s.status = "blocked"; s.error = "reuseSession ancestor did not report done; no continuation"; saveRun(run); continue;
+    }
+    // Placement first: a continuation inherits its chain's host, where its retained worker lives.
+    if (step.host && !s.remote) {
+      if (!runtime.placeAgent) { s.status = "blocked"; s.error = "this runtime cannot place steps on hosts"; saveRun(run); continue; }
+      let r: Awaited<ReturnType<NonNullable<SessionRuntime["placeAgent"]>>>;
+      try { r = await runtime.placeAgent(run, step); } catch (e) { r = { error: (e as Error).message }; }
+      if ("wait" in r) { s.error = `waiting for a host: ${r.wait}`; saveRun(run); continue; }
+      if ("error" in r) { s.status = "blocked"; s.error = r.error; saveRun(run); continue; }
+      delete s.error; saveRun(run);
     }
     if (step.reuseSession && (!runtime.continue || !await runtime.exists(run, step.id))) {
       s.status = "uncertain"; s.uncertainty = "worker"; s.error = "retained worker unavailable; no automatic recreation"; saveRun(run); continue;
@@ -178,7 +234,7 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
     try { await beginObservation(run, step); } catch (e) {
       s.status = "blocked"; s.error = `workspace observation failed: ${String(e)}`; saveRun(run); continue;
     }
-    const assignments = rows.filter(r => r.from === sender && isTask(parseBody(r), run, step.id));
+    const assignments = rows.filter(r => r.from === sender && isTask(parseBody(r), run, step.id) && fromItsHost(run, r, step.id));
     if (assignments.length > 1) { s.status = "uncertain"; s.error = "duplicate assignments found"; saveRun(run); continue; }
     if (!assignments.length) {
       s.status = "dispatching"; saveRun(run);
@@ -189,7 +245,7 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
       if (Buffer.byteLength(JSON.stringify(task)) > 99000) {
         s.status = "failed"; s.error = "assignment exceeds OCS message limit; shorten prompt or dependency fan-in"; saveRun(run); continue;
       }
-      try { await transport.send(run.channel, task, sender); }
+      try { if (runtime.remoteStep?.(run, step.id)) await runtime.sendTask!(run, step, task); else await transport.send(run.channel, task, sender); }
       catch (e) { s.status = "uncertain"; s.uncertainty = "dispatch"; s.error = String(e); saveRun(run); continue; }
     }
     s.status = "launching"; s.startedAt = Date.now(); s.prefixGroup = group; saveRun(run);
@@ -203,6 +259,7 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
   if (Object.values(run.steps).every(s => finished(s.status))) {
     run.status = "done";
     for (const step of run.workflow.steps) { await runtime.stop(run, step.id); run.steps[step.id].lifecycle = "closed"; }
+    await runtime.finish?.(run);
   } else if (!Object.values(run.steps).some(s => active.has(s.status))) run.status = "blocked";
   saveRun(run);
 }

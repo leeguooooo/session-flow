@@ -1,9 +1,11 @@
 export type Agent = "claude" | "codex" | "pi" | "agy";
 export const AGENTS: readonly Agent[] = ["claude", "codex", "pi", "agy"];
 export type Policy = "read-only" | "workspace-write";
+// "command" runs a frozen argv (a build or test) instead of a native agent session.
+export type Runner = Agent | "command";
 export interface Step {
   id: string;
-  agent: Agent;
+  agent: Runner;
   model?: string;
   prompt: string;
   cwd: string;
@@ -20,6 +22,10 @@ export interface Step {
   when?: Record<string, Record<string, Scalar>>;
   // A done report must carry these values, or the step ends blocked (the last review round).
   expect?: Record<string, Scalar>;
+  // Hosts (names from hosts.json, or "any") the step may run on; absent means this machine.
+  host?: string[];
+  command?: string[];
+  artifacts?: string[];
 }
 export type Scalar = string | number | boolean;
 export interface Workflow {
@@ -52,13 +58,33 @@ export interface StepState {
   contextBytes?: number;
   dependencyBytes?: number;
   fullDependencyBytes?: number;
+  // The host this step was placed on (recorded before the host is asked to do anything).
+  host?: string;
+  // Paths on that host: its run directory, and the working directory of this step.
+  remote?: { dir: string; cwd?: string; base?: string; materialized?: boolean; localTree?: string; pathMap?: Record<string, string> };
+  job?: JobState;
+}
+export interface JobState {
+  id: string;
+  phase: "placing" | "sending" | "starting" | "running" | "exited" | "collected";
+  commit?: string; tree?: string; head?: string; repo?: string; source?: string; cwd?: string;
+  receipt?: Record<string, unknown>;
+}
+export interface HostConfig {
+  ssh: string;
+  bin: string;
+  slots: number;
+  maxLoad: number;
+  minFreeGB: number;
+  site?: string;
+  tags?: string[];
 }
 export interface RunOrigin {
   template: string; scope: "project" | "global" | "builtin"; path: string; sha256: string;
   params: Record<string, Scalar>; roles: Record<string, { agent: Agent; model?: string; instructions?: string; sources: Record<string, string> }>;
 }
 export interface Run {
-  version: 1 | 2 | 3;
+  version: 1 | 2 | 3 | 4;
   origin?: RunOrigin;
   id: string;
   channel: string;
@@ -68,6 +94,10 @@ export interface Run {
   createdAt: number;
   status: "running" | "done" | "blocked" | "cancelled";
   steps: Record<string, StepState>;
+  // Hosts the workflow names, frozen at creation (record version 4).
+  hosts?: Record<string, HostConfig>;
+  // Set on a host's mirror of a run driven from another machine.
+  mirror?: { driver: string };
 }
 export interface TaskEvent {
   type: "sflow.task";
@@ -79,6 +109,8 @@ export interface TaskEvent {
   dependencies: Record<string, Record<string, unknown>>;
   workspaceObservation?: { baseline: string; dependencies: Record<string, { baseline: string; end?: string }>; warning: string };
   dependencyManifest?: { path: string; sha256: string; count: number };
+  // On another host: driver paths named in dependencies and where their copies are here.
+  pathMap?: Record<string, string>;
 }
 export interface WorkerEvent {
   type: "sflow.worker";
@@ -95,6 +127,8 @@ export interface Message {
   from: string;
   body: string;
   ts?: string;
+  // The host whose OCS channel this row came from; absent for this machine.
+  host?: string;
 }
 export interface SessionRuntime {
   create(run: Run, step: Step): Promise<void>;
@@ -105,6 +139,15 @@ export interface SessionRuntime {
   waitingOnPrompt?(run: Run, stepId: string): Promise<{ id: string; question: string[]; options: string[] } | null>;
   // A line from the worker's screen that explains why it has not accepted, if one is recognisable.
   diagnose?(run: Run, stepId: string): Promise<string | null>;
+  // Hosts and command steps (HostRouter). Absent on a plain local runtime.
+  remoteStep?(run: Run, stepId: string): boolean;
+  placeAgent?(run: Run, step: Step): Promise<{ ok: true } | { wait: string } | { error: string }>;
+  sendTask?(run: Run, step: Step, task: TaskEvent): Promise<void>;
+  remoteRows?(run: Run): Promise<Message[]>;
+  materialize?(run: Run, step: Step): Promise<void>;
+  startCommand?(run: Run, step: Step): Promise<{ ok: true } | { wait: string } | { error: string }>;
+  pollCommand?(run: Run, step: Step): Promise<void>;
+  finish?(run: Run): Promise<void>;
 }
 export interface Transport {
   read(channel: string, as: string): Promise<Message[]>;

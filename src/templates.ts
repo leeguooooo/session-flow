@@ -17,7 +17,7 @@ export interface Template {
 }
 export interface Preferences { version: 1; template?: string; roles?: Record<string, Pick<Role, "agent" | "model">>; params?: Record<string, Scalar> }
 export interface Located { template: Template; scope: Scope; path: string; sha256: string }
-export interface StartOptions { located?: Located; cwd: string; task: string; template?: string; params?: Record<string, unknown>; paramSources?: Record<string, string>; roles?: Record<string, { agent?: string; model?: string }>; write?: boolean; inPlace?: boolean }
+export interface StartOptions { located?: Located; cwd: string; task: string; template?: string; params?: Record<string, unknown>; paramSources?: Record<string, string>; roles?: Record<string, { agent?: string; model?: string }>; hosts?: Record<string, string[]>; write?: boolean; inPlace?: boolean }
 export interface Plan { workflow: Workflow; origin: RunOrigin; warnings: string[]; writes: boolean; project: string; templateSource: string; sources: Record<string, string> }
 const ID = /^[a-z][a-z0-9-]{0,39}$/;
 const PARAM = /^[a-z][a-zA-Z0-9_-]{0,39}$/;
@@ -78,11 +78,18 @@ export function parseTemplate(value: unknown): Template {
   }
   Object.keys(roles).forEach(k => visit(k));
   if (!Array.isArray(o.steps) || !o.steps.length) throw new Error("template needs steps");
-  const allowed = ["id", "role", "prompt", "cwd", "dependsOn", "policy", "worktree", "workspace", "inPlace", "reuseSession", "when", "expect", "timeoutSeconds", "readyTimeoutSeconds", "reviewFix"];
+  const allowed = ["id", "role", "prompt", "cwd", "dependsOn", "policy", "worktree", "workspace", "inPlace", "reuseSession", "when", "expect", "timeoutSeconds", "readyTimeoutSeconds", "reviewFix", "host", "command", "artifacts"];
   for (const value of o.steps) {
-    const s = obj(value, "step"); keys(s, allowed, "step"); id(s.id, "step"); id(s.role, `${s.id}.role`);
-    if (!Object.hasOwn(roles, s.role)) throw new Error(`${s.id}: unknown role ${s.role}`);
-    if (typeof s.prompt !== "string" || !s.prompt.trim()) throw new Error(`${s.id}: prompt required`);
+    const s = obj(value, "step"); keys(s, allowed, "step"); id(s.id, "step");
+    // A command step runs a program, not an agent: it has no role, and its prompt is optional.
+    if (s.command !== undefined) {
+      if (s.role !== undefined || s.reviewFix !== undefined) throw new Error(`${s.id}: a command step has no role or reviewFix`);
+      if (s.prompt !== undefined && (typeof s.prompt !== "string" || !s.prompt.trim())) throw new Error(`${s.id}: prompt must be text`);
+    } else {
+      id(s.role, `${s.id}.role`);
+      if (!Object.hasOwn(roles, s.role)) throw new Error(`${s.id}: unknown role ${s.role}`);
+      if (typeof s.prompt !== "string" || !s.prompt.trim()) throw new Error(`${s.id}: prompt required`);
+    }
     if (typeof s.cwd !== "string" || !s.cwd || isAbsolute(s.cwd) || s.cwd.split(/[\\/]/).includes("..")) throw new Error(`${s.id}: cwd must be a relative path without ..`);
     for (const [k, v] of Object.entries(s)) if (k !== "prompt" && k !== "reviewFix") forbidPlaceholders(v, `${s.id}.${k}`);
     if (s.reviewFix !== undefined) {
@@ -94,7 +101,7 @@ export function parseTemplate(value: unknown): Template {
       if (!Array.isArray(s.dependsOn) || !s.dependsOn.includes(f.workspace)) throw new Error("reviewFix workspace must be a direct dependency");
       if (s.when !== undefined || s.expect !== undefined || s.policy === "workspace-write" || s.worktree !== undefined || s.workspace !== undefined) throw new Error("reviewFix belongs to an unconditional read-only review step");
     }
-    for (const k of refs(s.prompt)) if (!Object.hasOwn(normalized, k)) throw new Error(`${s.id}: undeclared parameter ${k}`);
+    for (const k of refs(String(s.prompt ?? ""))) if (!Object.hasOwn(normalized, k)) throw new Error(`${s.id}: undeclared parameter ${k}`);
   }
   for (const [k, r] of Object.entries(roles)) for (const p of refs(r.instructions ?? "")) if (!Object.hasOwn(normalized, p)) throw new Error(`roles.${k}: undeclared parameter ${p}`);
   for (const [k, min, max] of [["concurrency", 1, 16], ["prefixWarmupMs", 0, 5000]] as const)
@@ -201,7 +208,11 @@ export function createTemplate(name: string, from: string, cwd: string, scope: "
       for (const step of wf.steps) { const rel = relative(root, realpathSync(step.cwd)); if (isAbsolute(rel) || rel.split(sep).includes("..")) throw new Error("imported workflow cwd must be within --cwd; choose the correct project root"); }
       const roles: Record<string, Role> = {};
       value = { version: 1, kind: "sflow-template", name, params: {}, concurrency: wf.concurrency, prefixWarmupMs: wf.prefixWarmupMs,
-        roles, steps: wf.steps.map(s => { roles[s.id] = { agent: s.agent, ...(s.model ? { model: s.model } : {}) }; const { agent: _, model: __, ...step } = s; return { ...step, cwd: relative(root, realpathSync(s.cwd)) || ".", role: s.id }; }) };
+        roles, steps: wf.steps.map(s => {
+          const { agent, model, ...step } = s, rel = relative(root, realpathSync(s.cwd)) || ".";
+          if (agent === "command") return { ...step, cwd: rel };
+          roles[s.id] = { agent, ...(model ? { model } : {}) }; return { ...step, cwd: rel, role: s.id };
+        }) };
     }
   } else value = locateTemplate(from, cwd).template;
   const template = parseTemplate({ ...obj(value, "template"), name });
@@ -270,7 +281,7 @@ export function prepareStart(o: StartOptions): Plan {
     return roles[k] = { agent: checked.agent!, ...(m !== undefined ? { model: m } : {}), ...(r.instructions !== undefined ? { instructions: replace(r.instructions) } : {}) };
   }
   Object.keys(t.roles).forEach(bind);
-  const used = new Set(t.steps.flatMap(s => refs(String(s.prompt))));
+  const used = new Set(t.steps.flatMap(s => refs(String(s.prompt ?? ""))));
   for (const r of Object.values(t.roles)) refs(r.instructions ?? "").forEach(k => used.add(k));
   const expanded: Record<string, unknown>[] = [];
   for (const s of t.steps) {
@@ -281,11 +292,17 @@ export function prepareStart(o: StartOptions): Plan {
       expanded.push(...expandReviewFix(first, { role: f.fixRole }, f.workspace, rounds, "{{task}}"));
     } else expanded.push(first);
   }
+  for (const k of Object.keys(o.hosts ?? {})) if (!expanded.some(s => s.id === k)) throw new Error(`unknown step ${k} for --host (template ${name})`);
   const steps: Record<string, unknown>[] = expanded.map(s => {
-    const { role: key, ...step } = s, r = roles[String(key)];
+    const { role: key, ...step } = s;
     const path = resolve(cwd, String(s.cwd)), physical = realpathSync(path);
     if (physical !== cwd && !physical.startsWith(cwd + sep)) throw new Error(`${s.id}: cwd escapes --cwd`);
-    return { ...step, cwd: physical, agent: r.agent, ...(r.model ? { model: r.model } : {}), prompt: replace(String(s.prompt)) + (r.instructions ? `\n\nRole instructions:\n${r.instructions}` : "") };
+    const host = o.hosts?.[String(s.id)];
+    if (host) sources[`steps.${s.id}.host`] = "CLI --host"; else if (s.host !== undefined) sources[`steps.${s.id}.host`] = located.path;
+    const placed = host ? { host } : {};
+    if (s.command !== undefined) return { ...step, ...placed, cwd: physical, agent: "command", ...(s.prompt !== undefined ? { prompt: replace(String(s.prompt)) } : {}) };
+    const r = roles[String(key)];
+    return { ...step, ...placed, cwd: physical, agent: r.agent, ...(r.model ? { model: r.model } : {}), prompt: replace(String(s.prompt)) + (r.instructions ? `\n\nRole instructions:\n${r.instructions}` : "") };
   });
   const writes = steps.some(s => s.policy === "workspace-write");
   if (writes && !o.write) throw new Error(`template ${name} writes code; add --write for this task (defaults cannot authorize writing)`);

@@ -67,7 +67,7 @@ The concurrency cap includes live blocked workers. Completed owned sessions are 
 
 ## MVP exclusions
 
-No GUI, automatic branch/repair loop, cron, cross-machine runtime creation, Desktop-hosted worker creation, automatic model routing, or automatic artifact merge. Future adapters can create sessions in other hosts while keeping the workflow engine and OCS message protocol unchanged.
+No GUI, automatic branch/repair loop, cron, Desktop-hosted worker creation, automatic model routing, or automatic artifact merge. Other machines are reached over SSH (see Hosts below).
 
 ## User template expansion
 
@@ -123,3 +123,106 @@ window cannot establish delivery from session existence: the round remains
 uncertain unless its own signed acceptance arrives. Never resend a continuation
 or recreate a missing retained worker automatically. Human input and trust
 prompts keep their native approval semantics.
+
+## Hosts: steps on other machines
+
+A step may run on another computer the user can reach with non-interactive SSH
+(`ssh -o BatchMode=yes <target>`). SSH reachability is the prerequisite; how the
+network gets there (same LAN, VPN, Tailscale, a jump host in `~/.ssh/config`) is
+the user's choice. OCS is not the channel: OCS LAN does not replicate channels and
+has no remote execution, so sflow talks to each host with `ssh <target> <bin>
+remote <op>`, JSON on stdin and stdout. Host key checking, agent forwarding and the
+rest of the SSH configuration stay as the user set them.
+
+Templates may carry `host` and command steps (no role); `sflow start --host
+<step>=<hosts>` overrides one step's host for a run and is recorded as its source.
+
+Hosts live in `<config home>/hosts.json`: name → `{ssh, bin, slots, maxLoad,
+minFreeGB, site, tags}`. A run freezes the entries its steps name at creation
+(record version 4); resume uses the frozen copy, never the current file. Every
+remote path (its data home, repos, worktrees) comes from the host's own `remote
+hello`, never computed locally: home directories and user names differ between
+machines. Driver and remote must speak the same `REMOTE_PROTOCOL` number.
+
+`host` on a step names one host, a list of hosts, or `"any"` (every host in the
+file). Without it the step runs locally as before. A step with `host` never falls
+back to the local machine. Selection probes each candidate (load per core under
+`maxLoad`, free disk over `minFreeGB`, protocol match) and then claims a slot on
+the remote atomically (`mkdir` of `slots/<n>`, shared by every controller using
+that host). A probe or claim refused before anything started is safe to retry on
+another host; after a claim the step belongs to that host.
+
+### Code on the remote
+
+Each host keeps one private bare repository per project under its data home.
+The driver never pushes to `origin`, never commits in the user's repository and
+never touches its HEAD or index. Objects created for transfer go to a private
+object directory in the run (alternates point at the project's objects).
+
+- Readers (read-only steps and command steps) see the same files as a local
+  reader: tracked plus untracked, non-ignored files of the checkout or of the
+  worktree they read, frozen into a commit with a temporary index, the same set
+  `workspace.ts` snapshots. Submodules are refused; ignored files are not sent;
+  Git LFS is not supported.
+- Write steps start from HEAD, as a local write step's new worktree does. When a
+  remote write step reports, the driver asks the host for a binary patch of the
+  remote worktree against that HEAD (untracked files included), verifies its
+  hash and applies it to a fresh run-owned local worktree at the same HEAD. The
+  result is a worktree with uncommitted changes, exactly what a local write step
+  leaves for review. Nothing is merged into the project.
+- The remote verifies the commit and tree it received before using them.
+
+`inPlace` steps cannot have a host. `workspace` and `reuseSession` chains stay on
+one host. In-place observation snapshots do not apply to remote readers: they read
+a frozen copy, so their writes cannot reach the checkout.
+
+### Command steps
+
+`agent: "command"` with `command: [argv]` runs a program instead of an agent:
+builds and tests. It reads `cwd` or the worktree of `workspace: <write step>`
+(that step must be an ancestor). `artifacts` lists paths inside the checkout to
+bring back. The argv, input commit and artifact list are frozen in the run; no
+worker can submit a command, and no wrapper accepts free-form shell.
+
+A command step is a job with a durable journal:
+
+1. The driver records `jobId` (run + step) and the chosen host before contacting it.
+2. The remote claims a slot, then `jobs/<jobId>` with an exclusive `mkdir`. An
+   existing job is reported, never started twice.
+3. The remote checks out the frozen commit in a job directory and starts the
+   command in its own process group, detached from SSH. It writes `started.json`,
+   the log, then `exit.json` (exit code or signal, times, arch), hashes the
+   declared artifacts (inside the checkout only; `..` and escaping symlinks are
+   refused), copies them out, removes the checkout and releases the slot.
+4. The driver polls by `jobId`. Losing SSH after step 2 makes the step
+   `uncertain`; it is never re-run, moved to another host or run locally. A job
+   whose runner died without `exit.json` is reported as lost.
+5. The driver fetches the log and artifacts, verifies every hash and stores the
+   receipt as the step's result: host, jobId, input commit and tree, argv hash,
+   arch, exit code or signal, times, log and artifact hashes. Exit 0 is `done`,
+   anything else `failed`; a hash mismatch or missing artifact is `blocked`.
+
+The receipt is evidence of what the command printed and returned; downstream
+review still decides what it means. A timeout or cancellation kills only the
+job's process group; when the host cannot be reached the cancellation is
+recorded as unknown, never as done. Without `host`, a command step runs the same
+journal on the local machine.
+
+### Agent steps on a host
+
+The driver stays the only writer of the run record. Before dispatch it sends the
+host a mirror: run id, channel, the tokens of that host's steps only, and the
+steps with remote paths. The remote's own tmux runtime creates the native
+session on a private socket there, so the worker wrapper, `ocs whoami` and the
+one-actor-one-step checks work unchanged on that machine. Assignments are sent
+to the host's own OCS channel; the driver reads each host's channel separately
+and accepts a report for a step only from the host that step runs on (sequence
+numbers are per machine). Dependency result files are uploaded and their paths
+rewritten; terminal results are fetched into the local result path with their
+SHA-256 checked before reconciliation. For a continuation round the driver
+updates the mirror's previous-round state first. status, logs, answer, attach,
+stop and cancel go through the same remote operations. Remote sessions count
+toward the workflow's concurrency and hold a host slot until they are closed.
+A step placed on a host that never runs (the run stays blocked) keeps that slot
+until `stop` or the run's cleanup; `sflow hosts check` lists slot owners. Running
+command jobs (and uncertain ones) count toward `concurrency` together with sessions.

@@ -8,6 +8,8 @@ import type { Run, Step } from "./types";
 interface Entry { hash: string; mode: number; kind: "file" | "symlink" }
 export interface Snapshot { root: string; head: string; index: string; files: Record<string, Entry> }
 export function observedProject(run: Run, step: Step): string | undefined {
+  // Command steps and steps on other hosts read a frozen copy; they cannot write this checkout.
+  if (step.agent === "command" || step.host) return undefined;
   const owner = run.workflow.steps.find(s => s.id === workspaceRoot(run.workflow.steps, step))!;
   if (owner.inPlace) return owner.cwd;
   if (step.policy === "workspace-write") return undefined;

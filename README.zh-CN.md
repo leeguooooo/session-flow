@@ -155,6 +155,35 @@ resume 会先对账 OCS 报告再继续推进。结果不确定的发送或 work
 
 运行记录存放在 `~/.local/state/session-flow/runs/<id>`（可用 `SFLOW_HOME` 覆盖）；每次运行的 OCS 消息走一个 `sflow-<id>` 频道。这些记录可能含有私密的任务文本，别把它们提交进 git。所有 worker 都跑在你的同一个系统账号下；协议防不住同一用户下的恶意进程。
 
+## 其他机器
+
+步骤可以跑在你能 ssh 上的其他电脑上。前提：那台机器装了 sflow，并且从发起 run 的这台机器能非交互 ssh 过去（`ssh -o BatchMode=yes <目标> true` 要能成功）。网络怎么通（局域网、VPN、Tailscale、`~/.ssh/config` 里的跳板）由你决定。
+
+```sh
+sflow hosts add box --ssh leo@192.168.0.190 --site office
+sflow hosts add mini --ssh macmini --site home --slots 1
+sflow hosts install box               # 在那台机器上跑发布版安装脚本（--from <二进制> 直接拷过去）
+sflow hosts check                     # sflow 版本、工具、负载、剩余磁盘、正在用的槽位
+```
+
+然后给步骤加 `"host": "box"`、一组主机名，或 `"any"`。构建和测试用 command 步骤：sflow 自己执行 argv，记录退出码、日志和产物，不经过 agent。
+
+```json
+{ "id": "test", "agent": "command", "host": "any", "cwd": ".", "dependsOn": ["implement"],
+  "workspace": "implement", "command": ["bun", "test"], "artifacts": ["coverage/summary.txt"] }
+```
+
+- 远端拿到的是文件的冻结副本：已跟踪和未跟踪、未被忽略的文件，包括未提交的修改。被忽略的文件不发送；不支持 submodule 和 Git LFS。你仓库的 HEAD、index 和对象库都不会被写入，也不会推到 `origin`。
+- 只有每核负载低于 `--max-load`（默认 0.8）、剩余磁盘高于 `--min-free-gb`（默认 5）时才会用这台机器。`--slots`（默认 2）限制那台机器上同时跑几个步骤，所有往这台机器派任务的人共用。
+- 带 host 的步骤不会退回本机跑。任务开始后主机失联，步骤记为 `uncertain`，不会重跑，也不会换机器。
+- agent 步骤也可以带 host。原生会话跑在那台机器上（那边要装好并登录对应的 CLI，还要有 tmux 和 ocs）；`status`、`logs`、`answer`、`attach` 用法不变。写入步骤的改动会以未提交修改的形式回到本机的 worktree，和本地写入步骤一样。`inPlace` 步骤只能在本机；`workspace` 和 `reuseSession` 链必须在同一台机器上。
+- run 启动时会把用到的主机配置复制进 run，之后改 `hosts.json` 不影响正在跑或 resume 的 run。
+- workflow 的 `concurrency` 同时限制 agent 会话和运行中的 command 步骤，两者合计不超过它。
+- 模板里也能写 `host` 和 command 步骤；`sflow start --host <步骤>=<主机>[,<主机>…]` 可以为这一次 run 改某个步骤的主机。
+- `sflow hosts gc [--days 7]` 清理主机上已结束的 command 任务。
+
+GUI 操作、截图、用你钥匙串签名，以及任何用到本机屏幕或浏览器 profile 的事，都不能给 host。
+
 ## 开发
 
 ```sh

@@ -91,6 +91,7 @@ Otherwise write the JSON from the user's description:
 - `policy` defaults to `read-only`. Writing defaults to `"policy": "workspace-write"` plus `"worktree": true` in a Git repo with at least one commit, or `"workspace": "<step>"` to continue in an earlier write step's worktree (it must be a dependency). Worktrees are never committed or merged for you.
 - `"when": {"<dep>": {"details.verdict": "needs-fix"}}` runs a step only on those result values, else it is `skipped`; a missing field blocks it. `"expect": {"details.verdict": "pass"}` blocks a `done` report without those values. Tell the worker the exact field, e.g. `report done '<summary>' --detail verdict=pass`.
 - `timeoutSeconds` (default 1800) and `readyTimeoutSeconds` (default 90) per step.
+- `"host": "<name>"` (or a list, or `"any"`) runs the step on another machine from `sflow hosts list`; it never falls back to this one. `"agent": "command"` with `"command": ["bun", "test"]` (optional `"workspace": "<write step>"`, `"artifacts": [paths]`) runs a build or test and records exit code, log and artifacts; use it for heavy builds/tests on other machines. Never give a host to GUI, screenshot, signing or browser-profile work. Check hosts with `sflow hosts check` first.
 - Each prompt must be self-contained: say what to inspect, what to produce and what "done" means. Dependency results are passed to the next step automatically.
 
 Save it under the project (for example `.sflow/<name>.json`), then:

@@ -39,7 +39,22 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
   const steps: Step[] = o.steps.map((value) => {
     const s = object(value);
     if (typeof s.id !== "string" || !ID.test(s.id)) throw new Error("invalid step id");
-    if (!AGENTS.includes(s.agent as Agent)) throw new Error(`${s.id}: agent must be one of ${AGENTS.join(", ")}`);
+    const isCommand = s.agent === "command";
+    if (!AGENTS.includes(s.agent as Agent) && !isCommand) throw new Error(`${s.id}: agent must be one of ${AGENTS.join(", ")}, or command`);
+    if (isCommand) {
+      if (!Array.isArray(s.command) || !s.command.length || s.command.length > 256 || s.command.some(a => typeof a !== "string" || !a || Buffer.byteLength(a) > 8192))
+        throw new Error(`${s.id}: a command step needs command: ["program", "arg", …]`);
+      for (const k of ["model", "worktree", "inPlace", "reuseSession"]) if (s[k] !== undefined) throw new Error(`${s.id}: ${k} does not apply to a command step`);
+      if (s.policy !== undefined && s.policy !== "read-only") throw new Error(`${s.id}: a command step reads a frozen copy; it cannot write the project`);
+      s.prompt ??= `run ${(s.command as string[]).join(" ")}`;
+    } else if (s.command !== undefined || s.artifacts !== undefined) throw new Error(`${s.id}: command and artifacts belong to agent: "command" steps`);
+    if (s.artifacts !== undefined && (!Array.isArray(s.artifacts) || s.artifacts.length > 64 ||
+      s.artifacts.some(a => typeof a !== "string" || !a || isAbsolute(a) || a.split("/").includes("..") || a.includes("\0"))))
+      throw new Error(`${s.id}: artifacts are paths inside the checkout`);
+    const host = s.host === undefined ? undefined : typeof s.host === "string" ? [s.host] : s.host;
+    if (host !== undefined && (!Array.isArray(host) || !host.length || host.some(h => typeof h !== "string" || !ID.test(h) || h === "local")))
+      throw new Error(`${s.id}: host is a host name, a list of names, or "any"`);
+    if (host && s.inPlace) throw new Error(`${s.id}: an inPlace step edits this machine's checkout; it cannot have a host`);
     if (typeof s.prompt !== "string" || !s.prompt.trim() || Buffer.byteLength(s.prompt) > 64 * 1024) throw new Error(`${s.id}: invalid prompt`);
     if (s.model !== undefined && (typeof s.model !== "string" || !s.model.trim() || s.model.startsWith("-"))) throw new Error(`${s.id}: invalid model`);
     if (typeof s.cwd !== "string" || !s.cwd) throw new Error(`${s.id}: cwd is required`);
@@ -60,7 +75,7 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
     if (s.worktree !== undefined && typeof s.worktree !== "boolean") throw new Error(`${s.id}: worktree must be boolean`);
     if (s.workspace !== undefined && (typeof s.workspace !== "string" || !ID.test(s.workspace))) throw new Error(`${s.id}: workspace must be a step id`);
     if (s.workspace !== undefined && s.worktree) throw new Error(`${s.id}: use either worktree: true or workspace: <step>`);
-    if (s.workspace !== undefined && policy !== "workspace-write") throw new Error(`${s.id}: workspace is only for write steps`);
+    if (s.workspace !== undefined && policy !== "workspace-write" && !isCommand) throw new Error(`${s.id}: workspace is only for write steps (and command steps reading one)`);
     if (policy === "workspace-write" && !s.worktree && !s.inPlace && s.workspace === undefined) throw new Error(`${s.id}: write steps require worktree: true, inPlace: true (or workspace: <an earlier write step>)`);
     const when = s.when === undefined ? undefined : Object.fromEntries(Object.entries(object(s.when)).map(([dep, f]) => {
       if (!(deps as string[]).includes(dep)) throw new Error(`${s.id}: when.${dep} must name a direct dependency`);
@@ -76,7 +91,8 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
         if (project === root || project.startsWith(root + "/") || root.startsWith(project + "/")) throw new Error(`${s.id}: project overlaps protocol write roots`);
       }
     }
-    return { id: s.id, agent: s.agent as Agent, model: s.model as string | undefined, prompt: s.prompt, cwd,
+    return { id: s.id, agent: isCommand ? "command" : s.agent as Agent, ...(isCommand ? { command: s.command as string[] } : {}),
+      ...(s.artifacts ? { artifacts: s.artifacts as string[] } : {}), ...(host ? { host: [...new Set(host as string[])].sort() } : {}), model: s.model as string | undefined, prompt: s.prompt, cwd,
       dependsOn: deps as string[], policy, worktree: s.worktree as boolean | undefined,
       ...(s.inPlace ? { inPlace: true } : {}), ...(s.reuseSession !== undefined ? { reuseSession: s.reuseSession as string } : {}),
       ...(s.workspace !== undefined ? { workspace: s.workspace as string } : {}), ...(when ? { when } : {}), ...(expect ? { expect } : {}),
@@ -102,6 +118,7 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
   };
   for (const s of steps.filter(s => s.workspace !== undefined)) {
     const owner = byId.get(s.workspace!);
+    if (s.agent !== "command" && JSON.stringify(s.host) !== JSON.stringify(owner?.host)) throw new Error(`${s.id}: a workspace chain stays on one host; give it the same host as ${s.workspace}`);
     if (!owner) throw new Error(`${s.id}: workspace ${s.workspace} is not a step`);
     if (owner.policy !== "workspace-write") throw new Error(`${s.id}: workspace ${s.workspace} is not a write step`);
     if (!ancestors(s.id).has(owner.id)) throw new Error(`${s.id}: workspace ${owner.id} must be one of its (indirect) dependencies`);
@@ -113,10 +130,15 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
   }
   for (const ids of writers.values()) for (const a of ids) for (const b of ids)
     if (a < b && !ancestors(a).has(b) && !ancestors(b).has(a)) throw new Error(`${a} and ${b} write in the same worktree; one must depend on the other`);
+  // A command step freezes the worktree it reads; every writer of it must come before or after.
+  for (const c of steps.filter(s => s.agent === "command" && s.workspace !== undefined))
+    for (const w of writers.get(workspaceRoot(steps, c)) ?? [])
+      if (!ancestors(c.id).has(w) && !ancestors(w).has(c.id)) throw new Error(`${c.id} reads the worktree ${w} writes; order them with dependsOn`);
   for (const s of steps) {
     if (s.reuseSession) {
       const prev = byId.get(s.reuseSession);
       if (!prev || !ancestors(s.id).has(prev.id)) throw new Error(`${s.id}: reuseSession must name an ancestor`);
+      if (JSON.stringify(s.host) !== JSON.stringify(prev.host)) throw new Error(`${s.id}: a reused session stays on one host; give it the same host as ${prev.id}`);
       if (s.agent === "agy" || s.agent !== prev.agent || s.model !== prev.model || s.policy !== prev.policy || effectiveWorkspace(steps, s) !== effectiveWorkspace(steps, prev))
         throw new Error(`${s.id}: reuseSession requires the same native agent, model, policy and workspace (agy unsupported)`);
     }

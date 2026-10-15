@@ -175,6 +175,53 @@ Only explicit `done` reports advance dependencies. A report is an agent's claim,
 
 Run records live at `~/.local/state/session-flow/runs/<id>` (`SFLOW_HOME` overrides this); OCS messages use one `sflow-<id>` channel per run. These records may contain private task text. Keep them out of git. All workers share your OS account; the protocol does not defend against malicious same-user processes.
 
+## Other machines
+
+Steps can run on other computers you reach with ssh. Each one needs sflow
+installed and non-interactive ssh from the driving machine (`ssh -o BatchMode=yes
+<target> true` must work); how the network gets there (LAN, VPN, Tailscale, a
+jump host in `~/.ssh/config`) is up to you.
+
+```sh
+sflow hosts add box --ssh leo@192.168.0.190 --site office
+sflow hosts add mini --ssh macmini --site home --slots 1
+sflow hosts install box               # runs the release installer there (--from <binary> copies one)
+sflow hosts check                     # sflow version, tools, load, free disk, slots in use
+```
+
+Then give a step `"host": "box"`, a list of names, or `"any"`. Builds and tests
+are command steps: sflow runs the argv itself and records exit code, log and
+artifacts, no agent involved.
+
+```json
+{ "id": "test", "agent": "command", "host": "any", "cwd": ".", "dependsOn": ["implement"],
+  "workspace": "implement", "command": ["bun", "test"], "artifacts": ["coverage/summary.txt"] }
+```
+
+- The host gets a frozen copy of the files: tracked and untracked, non-ignored
+  ones, including uncommitted edits. Ignored files are not sent;
+  submodules and Git LFS are not supported. Your repository's HEAD, index and object store
+  are never written; sflow never pushes to `origin`.
+- A host is used only while its load per core is under `--max-load` (default
+  0.8) and its free disk over `--min-free-gb` (default 5). `--slots` (default 2)
+  caps concurrent steps there, shared by everyone driving that host.
+- A step with a host never falls back to this machine. If the host stops
+  answering after the job started, the step becomes `uncertain`; it is never
+  started again or moved elsewhere.
+- Agent steps can have a host too. The native session runs there (its CLI must be
+  installed and signed in on that machine, plus tmux and ocs); `status`, `logs`,
+  `answer` and `attach` work the same. A write step's changes come back as
+  uncommitted edits in a local worktree, exactly like a local write step.
+  `inPlace` steps stay local; `workspace` and `reuseSession` chains stay on one host.
+- The hosts a workflow names are copied into the run when it starts, so editing
+  `hosts.json` does not change a running or resumed run.
+- Workflow `concurrency` caps agent sessions and running command steps together.
+- Templates can carry `host` and command steps too; `sflow start --host <step>=<host>[,<host>…]` overrides one step's host for a run.
+- `sflow hosts gc [--days 7]` deletes finished command jobs on the hosts.
+
+GUI work, screenshots, signing with your keychain, or anything using this
+machine's screen or browser profiles must not get a host.
+
 ## Development
 
 ```sh

@@ -164,3 +164,18 @@ test("start requires explicit in-place authorization each time and transforms wo
   expect(prepareStart({ cwd, template: "direct", task: "fixture", write: true, inPlace: true }).workflow.steps[0].inPlace).toBe(true);
   expect(() => prepareStart({ cwd, template: "builtin:review", task: "fixture", inPlace: true })).toThrow("write template");
 });
+
+test("templates carry command steps and hosts; --host overrides a step's host", () => {
+  const { cwd } = fixture();
+  saved(cwd, { ...template(), steps: [
+    { id: "look", role: "fix", cwd: ".", prompt: "Task {{task}}", host: "box" },
+    { id: "test", cwd: ".", dependsOn: ["look"], command: ["bun", "test"], artifacts: ["out.txt"], host: ["box", "mini"] },
+  ] });
+  const plan = prepareStart({ cwd, task: "x", template: "simple", hosts: { test: ["mini"] } });
+  const [look, run] = plan.workflow.steps;
+  expect(look.host).toEqual(["box"]); expect(look.agent).toBe("codex");
+  expect(run.agent).toBe("command"); expect(run.command).toEqual(["bun", "test"]); expect(run.host).toEqual(["mini"]);
+  expect(plan.sources["steps.test.host"]).toBe("CLI --host");
+  expect(() => prepareStart({ cwd, task: "x", template: "simple", hosts: { nope: ["mini"] } })).toThrow("unknown step nope");
+  expect(() => parseTemplate({ ...template(), steps: [{ id: "c", role: "fix", cwd: ".", command: ["true"] }] })).toThrow("no role");
+});

@@ -15,7 +15,7 @@ export function requiredTools(tmux: string, ocs: string, agents: Iterable<string
     pi: "; Pi workers also need the OCS Pi extension (`ocs doctor --fix` installs it)",
     agy: "; agy workers ask for approval before each command, so keep `sflow attach` handy",
   };
-  for (const agent of new Set(agents)) tools.push({ name: agent, binary: agent, versionArgs: ["--version"],
+  for (const agent of new Set([...agents].filter(a => a !== "command"))) tools.push({ name: agent, binary: agent, versionArgs: ["--version"],
     hint: `a step in this workflow uses ${agent}. Install the ${agent} CLI and sign in once interactively${extra[agent] ?? ""}` });
   return tools;
 }

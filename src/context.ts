@@ -39,6 +39,12 @@ export function buildTask(run: Run, step: Step): TaskEvent {
   }
   const task: TaskEvent = { type: "sflow.task", version: 1, runId: run.id, stepId: step.id, prompt: step.prompt,
     workspace: stepWorkspace(run, step), dependencies };
+  if (run.steps[step.id].baseline) task.workspaceObservation = {
+    baseline: run.steps[step.id].baseline!,
+    dependencies: Object.fromEntries(step.dependsOn.filter(id => run.steps[id].baseline).map(id => [id,
+      { baseline: run.steps[id].baseline!, ...(run.steps[id].observedEnd ? { end: run.steps[id].observedEnd } : {}) }])),
+    warning: "Existing user edits are in the baseline. Compare dependency before/after snapshots, not git diff HEAD, to attribute this workflow's changes. Outside writes during a write step cannot be distinguished; ignored files are excluded."
+  };
   if (Buffer.byteLength(JSON.stringify(dependencies)) > DEPENDENCY_CONTEXT_BYTES) {
     const manifest = Object.fromEntries(step.dependsOn.map(id => [id, run.steps[id].status === "skipped" ? { status: "skipped" } : resultReference(run, id)]));
     const body = JSON.stringify(manifest) + "\n", path = join(run.dir, `${step.id}-dependencies.json`);
@@ -56,5 +62,6 @@ export function buildTask(run: Run, step: Step): TaskEvent {
 // Where a step works: its own new worktree, an earlier step's worktree, or its cwd.
 export function stepWorkspace(run: Run, step: Step): string {
   if (step.policy !== "workspace-write") return step.cwd;
-  return join(run.dir, workspaceRoot(run.workflow.steps, step), "worktree");
+  const root = run.workflow.steps.find(s => s.id === workspaceRoot(run.workflow.steps, step))!;
+  return root.inPlace ? root.cwd : join(run.dir, root.id, "worktree");
 }

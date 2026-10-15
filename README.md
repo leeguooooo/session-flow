@@ -109,7 +109,7 @@ A hand-written workflow looks like this:
 }
 ```
 
-`model` is optional: omit it to use that CLI's configured default, or name a model your account supports. Relative `cwd` paths resolve from the workflow file. `dependsOn` creates a DAG; independent ready steps run concurrently. Default policy is `read-only`; writing requires `worktree: true` and a Git repository with an existing commit, or `"workspace": "<step>"` to keep working in an earlier write step's worktree (that step must be one of its dependencies; two steps writing in one worktree must be ordered). `"when": {"<dependency>": {"details.verdict": "needs-fix"}}` runs a step only if that dependency's result has those values, otherwise it is `skipped` (which counts as finished for later steps); a result that lacks the field stops the step instead of guessing. `"expect": {"details.verdict": "pass"}` turns a `done` report without those values into `blocked`. Workers set such fields with `report done '<summary>' --detail verdict=pass`. Default execution timeout is 1800 seconds, readiness timeout 90 seconds (`timeoutSeconds` / `readyTimeoutSeconds`).
+`model` is optional: omit it to use that CLI's configured default, or name a model your account supports. Relative `cwd` paths resolve from the workflow file. `dependsOn` creates a DAG; independent ready steps run concurrently. Default policy is `read-only`; writing defaults to `worktree: true` (or opts into `inPlace: true`, described below) and a Git repository with an existing commit, or `"workspace": "<step>"` to keep working in an earlier write step's worktree (that step must be one of its dependencies; two steps writing in one worktree must be ordered). `"when": {"<dependency>": {"details.verdict": "needs-fix"}}` runs a step only if that dependency's result has those values, otherwise it is `skipped` (which counts as finished for later steps); a result that lacks the field stops the step instead of guessing. `"expect": {"details.verdict": "pass"}` turns a `done` report without those values into `blocked`. Workers set such fields with `report done '<summary>' --detail verdict=pass`. Default execution timeout is 1800 seconds, readiness timeout 90 seconds (`timeoutSeconds` / `readyTimeoutSeconds`).
 
 The synthetic [examples/smoke.json](examples/smoke.json) exercises Claude planning, Claude/Codex parallel workers, and a Codex join without modifying project files. [examples/mixed.json](examples/mixed.json) runs the same graph on four agents: Pi plans, agy and Claude work in parallel, Codex joins.
 
@@ -119,7 +119,7 @@ The synthetic [examples/smoke.json](examples/smoke.json) exercises Claude planni
 
 | agent | read-only step | approvals | who may report |
 |---|---|---|---|
-| `claude` | file-edit tools disabled; only this step's wrapper is pre-approved | native Claude prompts | the Claude session (`claude-…`) |
+| `claude` | file-edit tools disabled; only this step's wrappers (or its declared reuse chain) are pre-approved | native Claude prompts | the Claude session (`claude-…`) |
 | `codex` | project outside the sandbox write roots | `on-request` | the full Codex thread (`codex-<thread id>`) |
 | `pi` | `edit` and `write` tools removed; **bash stays available** (Pi has no per-tool approvals) | none | the Pi session (`pi-<session id>`), which needs the OCS Pi extension (`ocs doctor --fix`) |
 | `agy` | instruction plus agy's approvals | agy asks before each command; answer with `sflow attach` | bound to the step (`agy-<run>-<step>`): agy has no per-session identity in OCS, so its report rests on the step's capability alone |
@@ -139,7 +139,7 @@ groups wait for the first worker to accept or for that timeout before launching
 a sibling. Enable it only after measuring whether it helps your workload.
 This makes prefix reuse possible;
 cache hits still depend on the native CLI and provider. Different models are not
-grouped, and write steps retain separate worktrees. Shared Claude workers must be
+grouped, and write steps use isolated worktrees by default. Shared Claude workers must be
 addressed by exact session IDs if you message them, since their workspace alias
 is ambiguous.
 
@@ -171,7 +171,7 @@ sflow stop <run-id>
 
 Resume reconciles OCS reports before progressing. An uncertain send or worker creation is never retried automatically. A readiness timeout can leave a worker waiting for human intervention; handle the prompt, then resume. Terminal failure/blocked reports are final for that run. Use a new run for an intentional retry.
 
-Only explicit `done` reports advance dependencies. A report is an agent's claim, so review its actual diff and checks. Finished sessions are archived and closed; `logs` reads the retained archive. Worktrees stay on disk for inspection and manual commit/merge. The runner does not automatically commit or merge them.
+Only explicit `done` reports advance dependencies. A report is an agent's claim, so review its actual diff and checks. Finished sessions are archived and closed once no declared later round needs them; `logs` reads the retained archive. Worktrees stay on disk for inspection and manual commit/merge. The runner does not automatically commit or merge them.
 
 Run records live at `~/.local/state/session-flow/runs/<id>` (`SFLOW_HOME` overrides this); OCS messages use one `sflow-<id>` channel per run. These records may contain private task text. Keep them out of git. All workers share your OS account; the protocol does not defend against malicious same-user processes.
 
@@ -184,3 +184,39 @@ bun run build
 ```
 
 [DESIGN.md](DESIGN.md) describes ownership, failure semantics, protocol, and MVP limits. Runtime adapters are replaceable; this release implements tmux with Claude, Codex, Pi and agy TUIs.
+
+## Write in the project and retain a worker
+
+Both options are opt-in. For implementation, review and repair in your checkout:
+
+```sh
+sflow init implement-review-fix --task "fix the bug" --cwd /path/to/project \
+  --write --in-place --reuse-sessions --rounds 2
+```
+
+`--in-place` requires `--write` and names the Git checkout root to modify in the
+printed plan. It never resets/stashes/cleans the checkout. The generated write
+step uses `inPlace: true` instead of `worktree: true`; `workspace` repair steps
+inherit it. All readers and writers on that checkout must be dependency ordered.
+`sflow start --template dev --write --in-place --task "…"` also supports direct
+writes. A template containing inPlace still needs both flags on every start.
+A saved JSON workflow explicitly containing inPlace authorizes `sflow run`.
+
+`sflow review` shows a delta between private before/after snapshots, excluding
+pre-existing staged, unstaged and non-ignored untracked edits. It provides a
+patch path and the snapshots; worker assignments include `workspaceObservation`
+so reviewers can inspect the same baseline. Changed HEAD/index, changes during
+read-only review, or changes between steps block progression. Ignored files are
+excluded; submodules are rejected. Concurrent outside writes during a write
+step cannot be distinguished from worker writes, and every summary says so.
+
+`--reuse-sessions` on this init preset retains the implementer's native TUI for
+fix rounds. Hand-written workflows and templates use `reuseSession: "<ancestor>"`.
+The ancestor must have reported done; agent/model/policy/workspace must match,
+and rounds must be ordered. Claude, Codex and Pi support this; agy has no native
+session identity and is rejected. Each round keeps a distinct token and result.
+An uncertain continuation is never resent, even if its TUI is still alive.
+Retained sessions occupy concurrency slots: use at least 2 for an implementer
+waiting on a separate reviewer. `status` records active/retained/closed lifecycle
+separately from step completion. Cancellation and final completion close owned
+sessions and retain artifacts.

@@ -12,6 +12,8 @@ export interface Step {
   timeoutSeconds: number;
   readyTimeoutSeconds: number;
   worktree?: boolean;
+  inPlace?: boolean;
+  reuseSession?: string;
   // Write in an ancestor write step's worktree instead of a new one (a fix after a review).
   workspace?: string;
   // Run only when each named dependency's result has these field values; otherwise "skipped".
@@ -43,6 +45,10 @@ export interface StepState {
   // Last time the worker was seen waiting on a user prompt; readiness restarts from here.
   promptAt?: number;
   prefixGroup?: string;
+  lifecycle?: "active" | "retained" | "closed";
+  baseline?: string;
+  observedEnd?: string;
+  workspaceWarning?: string;
   contextBytes?: number;
   dependencyBytes?: number;
   fullDependencyBytes?: number;
@@ -52,7 +58,7 @@ export interface RunOrigin {
   params: Record<string, Scalar>; roles: Record<string, { agent: Agent; model?: string; instructions?: string; sources: Record<string, string> }>;
 }
 export interface Run {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   origin?: RunOrigin;
   id: string;
   channel: string;
@@ -71,6 +77,7 @@ export interface TaskEvent {
   prompt: string;
   workspace: string;
   dependencies: Record<string, Record<string, unknown>>;
+  workspaceObservation?: { baseline: string; dependencies: Record<string, { baseline: string; end?: string }>; warning: string };
   dependencyManifest?: { path: string; sha256: string; count: number };
 }
 export interface WorkerEvent {
@@ -91,6 +98,7 @@ export interface Message {
 }
 export interface SessionRuntime {
   create(run: Run, step: Step): Promise<void>;
+  continue?(run: Run, step: Step): Promise<void>;
   exists(run: Run, stepId: string): Promise<boolean>;
   stop(run: Run, stepId: string): Promise<void>;
   // The menu the worker's TUI shows the user (trust, approval, login), if any.

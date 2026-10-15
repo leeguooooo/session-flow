@@ -17,7 +17,7 @@ export interface Template {
 }
 export interface Preferences { version: 1; template?: string; roles?: Record<string, Pick<Role, "agent" | "model">>; params?: Record<string, Scalar> }
 export interface Located { template: Template; scope: Scope; path: string; sha256: string }
-export interface StartOptions { located?: Located; cwd: string; task: string; template?: string; params?: Record<string, unknown>; paramSources?: Record<string, string>; roles?: Record<string, { agent?: string; model?: string }>; write?: boolean }
+export interface StartOptions { located?: Located; cwd: string; task: string; template?: string; params?: Record<string, unknown>; paramSources?: Record<string, string>; roles?: Record<string, { agent?: string; model?: string }>; write?: boolean; inPlace?: boolean }
 export interface Plan { workflow: Workflow; origin: RunOrigin; warnings: string[]; writes: boolean; project: string; templateSource: string; sources: Record<string, string> }
 const ID = /^[a-z][a-z0-9-]{0,39}$/;
 const PARAM = /^[a-z][a-zA-Z0-9_-]{0,39}$/;
@@ -78,7 +78,7 @@ export function parseTemplate(value: unknown): Template {
   }
   Object.keys(roles).forEach(k => visit(k));
   if (!Array.isArray(o.steps) || !o.steps.length) throw new Error("template needs steps");
-  const allowed = ["id", "role", "prompt", "cwd", "dependsOn", "policy", "worktree", "workspace", "when", "expect", "timeoutSeconds", "readyTimeoutSeconds", "reviewFix"];
+  const allowed = ["id", "role", "prompt", "cwd", "dependsOn", "policy", "worktree", "workspace", "inPlace", "reuseSession", "when", "expect", "timeoutSeconds", "readyTimeoutSeconds", "reviewFix"];
   for (const value of o.steps) {
     const s = obj(value, "step"); keys(s, allowed, "step"); id(s.id, "step"); id(s.role, `${s.id}.role`);
     if (!Object.hasOwn(roles, s.role)) throw new Error(`${s.id}: unknown role ${s.role}`);
@@ -289,6 +289,11 @@ export function prepareStart(o: StartOptions): Plan {
   });
   const writes = steps.some(s => s.policy === "workspace-write");
   if (writes && !o.write) throw new Error(`template ${name} writes code; add --write for this task (defaults cannot authorize writing)`);
+  if (steps.some(s => s.inPlace) && !o.inPlace) throw new Error(`template ${name} writes directly in the project checkout; add --in-place and --write for this task`);
+  if (o.inPlace) {
+    if (!writes) throw new Error("--in-place requires a write template and --write");
+    for (const s of steps.filter(s => s.worktree)) { delete s.worktree; s.inPlace = true; s.prompt += "\nWrite directly in the existing project checkout. Preserve all pre-existing user edits; never reset, stash or clean."; }
+  }
   const workflow = parseWorkflow({ version: 1, name: t.name, concurrency: t.concurrency ?? 2, prefixWarmupMs: t.prefixWarmupMs ?? 0, steps }, cwd);
   return { workflow, writes, project: projectRoot(cwd), templateSource, warnings: [...warnings, ...Object.keys(t.params).filter(k => !used.has(k)).map(k => `parameter ${k} is declared but unused`)], sources,
     origin: { template: t.name, scope: located.scope, path: located.path, sha256: located.sha256, params, roles: Object.fromEntries(Object.entries(roles).map(([k, v]) => [k, { ...v, sources: Object.fromEntries(Object.entries(sources).filter(([f]) => f.startsWith(`roles.${k}.`)) ) }])) } };

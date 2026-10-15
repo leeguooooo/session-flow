@@ -1,8 +1,16 @@
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, resolve, dirname, basename, join } from "node:path";
 import { statSync, realpathSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { AGENTS, type Agent, type Scalar, type Step, type Workflow } from "./types";
 
+function physical(path: string): string {
+  const p = resolve(path);
+  try { return realpathSync(p); } catch {
+    const parent = dirname(p);
+    return parent === p ? p : join(physical(parent), basename(p));
+  }
+}
 const ID = /^[a-z][a-z0-9-]{0,39}$/;
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("expected an object");
@@ -42,11 +50,18 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
     if (new Set(deps).size !== deps.length) throw new Error(`${s.id}: duplicate dependency`);
     const policy = s.policy ?? "read-only";
     if (policy !== "read-only" && policy !== "workspace-write") throw new Error(`${s.id}: unsupported policy`);
+    if (s.inPlace !== undefined && typeof s.inPlace !== "boolean") throw new Error(`${s.id}: inPlace must be boolean`);
+    if (s.inPlace && (policy !== "workspace-write" || s.worktree || s.workspace !== undefined)) throw new Error(`${s.id}: inPlace requires a write step without worktree/workspace`);
+    if (s.inPlace) {
+      const git = spawnSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
+      if (git.status !== 0 || realpathSync(git.stdout.trim()) !== realpathSync(cwd)) throw new Error(`${s.id}: inPlace cwd must be the Git checkout root`);
+    }
+    if (s.reuseSession !== undefined && (typeof s.reuseSession !== "string" || !ID.test(s.reuseSession))) throw new Error(`${s.id}: reuseSession must be a step id`);
     if (s.worktree !== undefined && typeof s.worktree !== "boolean") throw new Error(`${s.id}: worktree must be boolean`);
     if (s.workspace !== undefined && (typeof s.workspace !== "string" || !ID.test(s.workspace))) throw new Error(`${s.id}: workspace must be a step id`);
     if (s.workspace !== undefined && s.worktree) throw new Error(`${s.id}: use either worktree: true or workspace: <step>`);
     if (s.workspace !== undefined && policy !== "workspace-write") throw new Error(`${s.id}: workspace is only for write steps`);
-    if (policy === "workspace-write" && !s.worktree && s.workspace === undefined) throw new Error(`${s.id}: write steps require worktree: true (or workspace: <an earlier write step>)`);
+    if (policy === "workspace-write" && !s.worktree && !s.inPlace && s.workspace === undefined) throw new Error(`${s.id}: write steps require worktree: true, inPlace: true (or workspace: <an earlier write step>)`);
     const when = s.when === undefined ? undefined : Object.fromEntries(Object.entries(object(s.when)).map(([dep, f]) => {
       if (!(deps as string[]).includes(dep)) throw new Error(`${s.id}: when.${dep} must name a direct dependency`);
       return [dep, fields(f, `${s.id}: when.${dep}`)];
@@ -54,15 +69,16 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
     if (when && !Object.keys(when).length) throw new Error(`${s.id}: when needs at least one dependency`);
     const expect = s.expect === undefined ? undefined : fields(s.expect, `${s.id}: expect`);
     if (policy === "read-only" && s.worktree) throw new Error(`${s.id}: worktree is only for write steps`);
-    if (policy === "read-only") {
+    if (policy === "read-only" || s.inPlace) {
       const project = realpathSync(cwd);
       for (const path of [process.env.SFLOW_HOME ?? resolve(homedir(), ".local/state/session-flow"), process.env.OCS_HOME ?? resolve(homedir(), ".ocs")]) {
-        let root = resolve(path); try { root = realpathSync(root); } catch {}
-        if (project === root || project.startsWith(root + "/") || root.startsWith(project + "/")) throw new Error(`${s.id}: read-only project overlaps protocol write roots`);
+        const root = physical(path);
+        if (project === root || project.startsWith(root + "/") || root.startsWith(project + "/")) throw new Error(`${s.id}: project overlaps protocol write roots`);
       }
     }
     return { id: s.id, agent: s.agent as Agent, model: s.model as string | undefined, prompt: s.prompt, cwd,
       dependsOn: deps as string[], policy, worktree: s.worktree as boolean | undefined,
+      ...(s.inPlace ? { inPlace: true } : {}), ...(s.reuseSession !== undefined ? { reuseSession: s.reuseSession as string } : {}),
       ...(s.workspace !== undefined ? { workspace: s.workspace as string } : {}), ...(when ? { when } : {}), ...(expect ? { expect } : {}),
       timeoutSeconds: integer(s.timeoutSeconds, 1800, 10, 86400),
       readyTimeoutSeconds: integer(s.readyTimeoutSeconds, 90, 5, 600) };
@@ -97,6 +113,28 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
   }
   for (const ids of writers.values()) for (const a of ids) for (const b of ids)
     if (a < b && !ancestors(a).has(b) && !ancestors(b).has(a)) throw new Error(`${a} and ${b} write in the same worktree; one must depend on the other`);
+  for (const s of steps) {
+    if (s.reuseSession) {
+      const prev = byId.get(s.reuseSession);
+      if (!prev || !ancestors(s.id).has(prev.id)) throw new Error(`${s.id}: reuseSession must name an ancestor`);
+      if (s.agent === "agy" || s.agent !== prev.agent || s.model !== prev.model || s.policy !== prev.policy || effectiveWorkspace(steps, s) !== effectiveWorkspace(steps, prev))
+        throw new Error(`${s.id}: reuseSession requires the same native agent, model, policy and workspace (agy unsupported)`);
+    }
+  }
+  for (const a of steps) for (const b of steps) {
+    if (a.id >= b.id) continue;
+    const inPlace = [a, b].some(s => steps.find(x => x.id === workspaceRoot(steps, s))?.inPlace);
+    const path = (s: Step) => {
+      const root = steps.find(x => x.id === workspaceRoot(steps, s))!;
+      return realpathSync(root.inPlace ? root.cwd : s.cwd);
+    };
+    const pa = path(a), pb = path(b);
+    if (inPlace && (pa === pb || pa.startsWith(pb + "/") || pb.startsWith(pa + "/")) &&
+        [a, b].some(s => s.policy === "workspace-write") && !ancestors(a.id).has(b.id) && !ancestors(b.id).has(a.id))
+      throw new Error(`${a.id} and ${b.id}: in-place readers/writers must be dependency ordered`);
+    if (sessionRoot(steps, a) === sessionRoot(steps, b) && !ancestors(a.id).has(b.id) && !ancestors(b.id).has(a.id))
+      throw new Error(`${a.id} and ${b.id}: reused sessions must be dependency ordered`);
+  }
   return { version: 1, name: o.name, concurrency: integer(o.concurrency, 2, 1, 16), prefixWarmupMs: integer(o.prefixWarmupMs, 0, 0, 5000), steps };
 }
 
@@ -105,4 +143,14 @@ export function workspaceRoot(steps: Step[], step: Step): string {
   let current = step;
   for (let i = 0; current.workspace !== undefined && i < steps.length; i++) current = steps.find(s => s.id === current.workspace)!;
   return current.id;
+}
+
+export function sessionRoot(steps: Step[], step: Step): string {
+  let s = step;
+  for (let i = 0; s.reuseSession && i < steps.length; i++) s = steps.find(x => x.id === s.reuseSession)!;
+  return s.id;
+}
+function effectiveWorkspace(steps: Step[], step: Step): string {
+  const root = steps.find(s => s.id === workspaceRoot(steps, step))!;
+  return step.policy === "read-only" || root.inPlace ? realpathSync(root.cwd) : `worktree:${root.id}`;
 }

@@ -1,4 +1,6 @@
 import { existsSync } from "node:fs";
+import { changedFiles, readSnapshot, snapshotDiff } from "./workspace";
+import { join } from "node:path";
 import { workspaceRoot } from "./config";
 import { command } from "./process";
 import { resolveResult } from "./results";
@@ -10,6 +12,7 @@ export interface StepReview {
   reported?: { status: unknown; summary: string; resultFile?: string; sha256?: string; artifacts?: unknown; checks?: unknown; details?: unknown };
   // What sflow saw itself in a write step's worktree.
   worktree?: { path: string; branch?: string; exists: boolean; changes?: string[]; diffStat?: string };
+  workspaceDelta?: { path: string; baseline: string; end?: string; changes?: string[]; diff?: string; warning: string };
   session: "open" | "closed";
 }
 export interface RunReview { origin?: { template: string; scope: string; path: string; sha256: string }; runId: string; workflow: string; status: string; steps: StepReview[]; next: string[]; note: string }
@@ -39,7 +42,16 @@ export async function reviewRun(run: Run, runtime: SessionRuntime): Promise<RunR
         ...(full.artifacts !== undefined ? { artifacts: full.artifacts } : {}), ...(full.checks !== undefined ? { checks: full.checks } : {}),
         ...(full.details !== undefined ? { details: full.details } : {}) };
     }
-    if (step.policy === "workspace-write" && s.cwd) {
+    if (s.baseline) {
+      const before = readSnapshot(s.baseline);
+      review.workspaceDelta = { path: before.root, baseline: s.baseline, ...(s.observedEnd ? { end: s.observedEnd } : {}),
+        warning: s.workspaceWarning ?? "Step has no end snapshot yet; no change attribution available." };
+      if (s.observedEnd) {
+        review.workspaceDelta.changes = changedFiles(before, readSnapshot(s.observedEnd));
+        review.workspaceDelta.diff = await snapshotDiff(s.baseline, s.observedEnd, join(run.dir, `${step.id}-delta.patch`));
+      }
+    }
+    if (step.policy === "workspace-write" && s.cwd && !s.baseline) {
       const exists = existsSync(s.cwd);
       review.worktree = { path: s.cwd, exists, branch: `sflow/${run.id}/${workspaceRoot(run.workflow.steps, step)}` };
       if (exists) {
@@ -73,6 +85,10 @@ export function renderReview(r: RunReview): string[] {
       if (s.reported.checks !== undefined) lines.push(`    checks (as reported, not rerun): ${JSON.stringify(s.reported.checks).slice(0, 300)}`);
       if (s.reported.artifacts !== undefined) lines.push(`    artifacts (as reported): ${JSON.stringify(s.reported.artifacts).slice(0, 300)}`);
       if (s.reported.resultFile) lines.push(`    full result: sflow result ${r.runId} ${s.id}`);
+    }
+    if (s.workspaceDelta) {
+      lines.push(`    in-place checkout: ${s.workspaceDelta.path}; ${s.workspaceDelta.changes?.length ?? "unknown"} file(s) changed since step start${s.workspaceDelta.diff ? `; diff ${s.workspaceDelta.diff}` : ""}`);
+      lines.push(`    observation: ${s.workspaceDelta.warning}`);
     }
     if (s.worktree) lines.push(`    worktree: ${s.worktree.path}${s.worktree.exists ? ` — sflow sees ${s.worktree.changes?.length ?? 0} changed file(s)${s.worktree.diffStat ? ` (${s.worktree.diffStat})` : ""}` : " (gone)"}`);
     if (s.error) lines.push(`    note: ${s.error}`);

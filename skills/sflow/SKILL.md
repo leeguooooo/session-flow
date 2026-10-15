@@ -88,7 +88,7 @@ Otherwise write the JSON from the user's description:
 - `agent`: `claude`, `codex`, `pi` or `agy`. `model` is optional (the CLI's default otherwise).
 - `cwd` is required; relative paths resolve from the workflow file.
 - `dependsOn` forms a DAG; ready steps run in parallel up to `concurrency` (default 2).
-- `policy` defaults to `read-only`. Writing needs `"policy": "workspace-write"` plus `"worktree": true` in a Git repo with at least one commit, or `"workspace": "<step>"` to continue in an earlier write step's worktree (it must be a dependency). Worktrees are never committed or merged for you.
+- `policy` defaults to `read-only`. Writing defaults to `"policy": "workspace-write"` plus `"worktree": true` in a Git repo with at least one commit, or `"workspace": "<step>"` to continue in an earlier write step's worktree (it must be a dependency). Worktrees are never committed or merged for you.
 - `"when": {"<dep>": {"details.verdict": "needs-fix"}}` runs a step only on those result values, else it is `skipped`; a missing field blocks it. `"expect": {"details.verdict": "pass"}` blocks a `done` report without those values. Tell the worker the exact field, e.g. `report done '<summary>' --detail verdict=pass`.
 - `timeoutSeconds` (default 1800) and `readyTimeoutSeconds` (default 90) per step.
 - Each prompt must be self-contained: say what to inspect, what to produce and what "done" means. Dependency results are passed to the next step automatically.
@@ -187,3 +187,21 @@ changing anything: `sflow upgrade --check`. The user may also just say
 If the skill came from somewhere `upgrade` can't refresh:
 - Claude Code plugin: `claude plugin update sflow@leeguooooo-plugins`
 - Whole family: `curl -fsSL https://raw.githubusercontent.com/leeguooooo/plugins/main/upgrade-use-family.sh | sh`
+
+## Opt-in checkout writes and worker reuse
+
+Default to isolated worktrees. When the user authorizes modifying their existing
+checkout, pass both --write and --in-place to init/start, and show the exact
+checkout directory in the plan. Never infer in-place authorization from --write
+alone. JSON uses inPlace: true; workspace repair rounds inherit it. Do not reset,
+stash or clean user edits. Use workspaceObservation snapshots and sflow review's
+workspaceDelta, not diff HEAD, to attribute changes. Warn that concurrent outside
+writes during a write step cannot be attributed; ignored files are not observed.
+
+init implement-review-fix accepts --reuse-sessions to retain the implementer for
+repairs. Workflows/templates use reuseSession: <ancestor>; same agent/model/policy
+and workspace, ordered rounds, explicit previous done. Claude/Codex/Pi only.
+Every round still fetches its own wrapper task and reports once. Retained TUIs
+occupy concurrency slots (at least 2 when another reviewer must run). Never resend
+an uncertain continuation or recreate a missing retained TUI. Lifecycle and round
+completion are separate fields in status.

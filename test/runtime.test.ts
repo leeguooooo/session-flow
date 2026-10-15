@@ -128,3 +128,26 @@ test("Claude may run its worker command with the path quoted or bare", async () 
     "Bash('/s/runs/r/look/worker' task),Bash('/s/runs/r/look/worker' report *),Bash(/s/runs/r/look/worker task),Bash(/s/runs/r/look/worker report *)");
   expect(allowWorker("/a b/worker", "'/a b/worker'")).toBe("Bash('/a b/worker' task),Bash('/a b/worker' report *)");
 });
+
+test.skipIf(!Bun.which("tmux"))("continuation sends the new wrapper to the same native process without creating another session", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sf-continue-")); cleanup.push(root);
+  const bin = join(root, "bin"), project = join(root, "project"); mkdirSync(bin); mkdirSync(project);
+  process.env.SFLOW_HOME = join(root, "state"); process.env.PATH = bin + ":" + oldPath;
+  writeFileSync(join(bin, "codex"), '#!/bin/sh\nprintf "%s" "$$" > native-pid\nIFS= read -r line\nprintf "%s" "$line" > continued.txt\nwhile :; do sleep 1; done\n'); chmodSync(join(bin, "codex"), 0o700);
+  const r = createRun(parseWorkflow({ version: 1, name: "retained", steps: [
+    { id: "first", agent: "codex", cwd: project, prompt: "first" },
+    { id: "second", agent: "codex", cwd: project, prompt: "second", dependsOn: ["first"], reuseSession: "first" }] }, root));
+  cleanup.push(join(r.socket, "..")); const rt = new TmuxRuntime(["/bin/true"]);
+  try {
+    r.steps.first.status = "launching"; await rt.create(r, r.workflow.steps[0]);
+    const pid = await readWhenWritten(join(r.steps.first.cwd!, "native-pid"));
+    r.steps.first.status = "done"; r.steps.second.status = "launching"; await rt.continue(r, r.workflow.steps[1]);
+    expect(await readWhenWritten(join(r.steps.second.cwd!, "continued.txt"))).toContain(join(r.dir, "second", "worker"));
+    expect(readFileSync(join(r.steps.first.cwd!, "native-pid"), "utf8")).toBe(pid);
+    const sessions = await command(["tmux", "-S", r.socket, "list-sessions", "-F", "#{session_name}"]); expect(sessions.stdout.trim().split("\n")).toEqual(["sf-first"]);
+    const wrapper = readFileSync(join(r.dir, "second", "worker"), "utf8"); expect(wrapper).toContain(r.steps.second.token); expect(wrapper).not.toContain(r.steps.first.token);
+    await rt.stop(r, "second");
+    expect(readFileSync(join(r.dir, "first", "terminal.txt"), "utf8")).toContain("Next Session Flow round");
+    expect(readFileSync(join(r.dir, "second", "terminal.txt"), "utf8")).toContain("Next Session Flow round");
+  } finally { await rt.stop(r, "second"); }
+});

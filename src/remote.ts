@@ -361,14 +361,18 @@ export async function rt(input: any, cli: string[]) {
 export async function cleanup(input: any) {
   const run = mirrorRun(input?.runId);
   await withLock(() => { for (const s of slotOwners()) if (s.owner.startsWith(`step:${run.id}:`)) releaseLocked(s.owner); });
-  const dir = checkoutsDir(run.id);
+  await removeCheckouts(run.id);
+  return { ok: true };
+}
+async function removeCheckouts(runId: string) {
+  const dir = checkoutsDir(runId);
   if (existsSync(dir)) for (const name of readdirSync(dir)) {
     const path = join(dir, name);
     const common = (await command(["git", "-C", path, "rev-parse", "--git-common-dir"])).stdout.trim();
     if (common) await command(["git", "-C", common, "worktree", "remove", "--force", path], { timeoutMs: 300_000 });
     rmSync(path, { recursive: true, force: true });
   }
-  return { ok: true };
+  rmSync(dir, { recursive: true, force: true });
 }
 
 // The one interactive operation: ssh -t <host> sflow remote attach <run> <step>.
@@ -380,13 +384,12 @@ export async function attach(runId: string, stepId: string, cli: string[]) {
   const child = spawn(argv[0], argv.slice(1), { stdio: "inherit" });
   await new Promise<void>(res => child.on("exit", c => { process.exitCode = c ?? 1; res(); }));
 }
-// Finished jobs older than the cutoff: their directory and the ref that carried their input.
+// Finished jobs keep tombstones; old mirrors without live workers can be removed entirely.
 export async function gc(input: any) {
   const days = Number(input?.days ?? 7);
   if (!Number.isFinite(days) || days < 0) throw new Error("invalid days");
-  const root = join(dataHome(), "jobs"), removed: string[] = [];
-  if (!existsSync(root)) return { removed };
-  for (const id of readdirSync(root)) {
+  const root = join(dataHome(), "jobs"), removed: string[] = [], mirrors: string[] = [];
+  for (const id of existsSync(root) ? readdirSync(root) : []) {
     if (!JOB.test(id)) continue;
     const dir = join(root, id), exit = readJSON(join(dir, "exit.json"));
     if (existsSync(join(dir, "tombstone.json")) || !exit || Date.now() - Number(exit.finishedAt ?? 0) < days * 86400_000) continue;
@@ -399,7 +402,26 @@ export async function gc(input: any) {
     });
     removed.push(id);
   }
-  return { removed };
+  const runs = join(dataHome(), "runs");
+  for (const id of existsSync(runs) ? readdirSync(runs) : []) {
+    const dir = join(runs, id), file = join(dir, "run.json");
+    if (!RUN.test(id) || !lstatSync(dir).isDirectory()) continue;
+    const run = readJSON(file);
+    if (!run || !Object.hasOwn(run, "mirror") || Date.now() - statSync(file).mtimeMs < days * 86400_000) continue;
+    // Only this mirror's private socket; either tmux answer can prove a worker is live.
+    if (typeof run.socket !== "string" || !run.socket) continue;
+    if (existsSync(run.socket)) {
+      const has = await command(["tmux", "-S", run.socket, "has-session"]);
+      if (has.code === 0) continue;
+      const list = await command(["tmux", "-S", run.socket, "list-sessions"]);
+      if (list.stdout.trim()) continue;
+    }
+    await withLock(() => { for (const s of slotOwners()) if (s.owner.startsWith(`step:${id}:`)) releaseLocked(s.owner); });
+    await removeCheckouts(id);
+    rmSync(dir, { recursive: true, force: true });
+    mirrors.push(id);
+  }
+  return { removed, mirrors };
 }
 export async function serve(op: string, version: string, cli: string[]): Promise<void> {
   widenPath();

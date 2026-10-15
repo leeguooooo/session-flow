@@ -52,7 +52,7 @@ sflow hosts add <name> --ssh <user@host|ssh alias> [--bin path] [--slots n] [--m
 sflow hosts remove <name>
 sflow hosts check [name...] [--json]      reach each host over ssh: sflow version, tools, load, disk, slots
 sflow hosts install <name> [--from <sflow binary>]   install sflow there (the release installer, or copy a binary)
-sflow hosts gc [name...] [--days n]       delete finished command jobs older than n days (default 7) on those hosts
+sflow hosts gc [name...] [--days n]       delete finished jobs and inactive mirror runs older than n days (default 7) on those hosts
 
 A step runs on a host with "host": "<name>" (or a list, or "any"); "agent": "command" with
 "command": [argv] runs a build or test there. Hosts need non-interactive ssh (BatchMode) from here.
@@ -114,7 +114,7 @@ export async function hostsCommand(args: string[], _router: HostRouter): Promise
     let bad = 0;
     for (const n of list.length ? list : Object.keys(hosts)) {
       if (!hosts[n]) throw new Error(`unknown host ${n}`);
-      try { const r = await new SshLink(n, hosts[n]).call<{ removed: string[] }>("gc", { days }, 600_000); console.log(`${n}: removed ${r.removed.length} job(s)`); }
+      try { const r = await new SshLink(n, hosts[n]).call<{ removed: string[]; mirrors: string[] }>("gc", { days }, 600_000); console.log(`${n}: removed ${r.removed.length} job(s), ${r.mirrors.length} mirror run(s)`); }
       catch (e) { bad++; console.log(`${n}: ${(e as Error).message}`); }
     }
     return bad ? 1 : 0;

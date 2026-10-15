@@ -1,5 +1,5 @@
 import { test, expect, afterEach, beforeEach } from "bun:test";
-import { realpathSync, mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, chmodSync, readdirSync } from "node:fs";
+import { realpathSync, mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, chmodSync, readdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -294,7 +294,7 @@ test("reports for a remote step count only from that host's channel; results are
 }, 60_000);
 
 // ---- failure cases from review ----
-import { claimSlot, jobCancel, jobExec, jobStatus } from "../src/remote";
+import { claimSlot, gc, jobCancel, jobExec, jobStatus } from "../src/remote";
 import type { SessionRuntime, Step } from "../src/types";
 
 test("a lost start answer after gc is never started again: the tombstone makes it uncertain", async () => {
@@ -310,6 +310,44 @@ test("a lost start answer after gc is never started again: the tombstone makes i
   expect(run.steps.a.error).toContain("never started again");
   expect(readFileSync(join(base, "host-mini", "count"), "utf8")).toBe("x\n");
 }, 60_000);
+
+test("gc removes old mirrors and their worktrees and releases only their slots", async () => {
+  process.env.SFLOW_HOME = join(base, "solo");
+  const home = process.env.SFLOW_HOME, id = "00000000-0000-0000-0000-000000000001";
+  const dir = join(home, "runs", id), bare = join(home, "repos", "test.git"), checkout = join(home, "checkouts", id, "work");
+  mkdirSync(dir, { recursive: true }); mkdirSync(join(home, "repos"), { recursive: true });
+  git(project, "clone", "--bare", ".", bare);
+  git(bare, "worktree", "add", "--detach", checkout, "HEAD");
+  const realCheckout = realpathSync(checkout);
+  writeFileSync(join(checkout, "tracked.txt"), "left by worker\n");
+  const file = join(dir, "run.json"), old = new Date(Date.now() - 8 * 86400_000);
+  writeFileSync(file, JSON.stringify({ mirror: { driver: "other" }, socket: join(dir, "missing.sock") }));
+  utimesSync(file, old, old);
+  expect(await claimSlot(`step:${id}:a`, 3)).toBe(true);
+  expect(await claimSlot(`step:${id}:b`, 3)).toBe(true);
+  expect(await claimSlot("step:other:a", 3)).toBe(true);
+  expect(await gc({ days: 7 })).toEqual({ removed: [], mirrors: [id] });
+  expect(existsSync(dir)).toBe(false);
+  expect(existsSync(join(home, "checkouts", id))).toBe(false);
+  expect(git(bare, "worktree", "list", "--porcelain")).not.toContain(realCheckout);
+  const owners = readdirSync(join(home, "slots")).map(n => JSON.parse(readFileSync(join(home, "slots", n, "owner.json"), "utf8")).owner);
+  expect(owners).toEqual(["step:other:a"]);
+});
+
+test("gc keeps fresh mirrors and old runs driven on this host", async () => {
+  process.env.SFLOW_HOME = join(base, "solo");
+  const fresh = "00000000-0000-0000-0000-000000000002", local = "00000000-0000-0000-0000-000000000003";
+  for (const id of [fresh, local]) {
+    const dir = join(process.env.SFLOW_HOME, "runs", id); mkdirSync(dir, { recursive: true });
+    const file = join(dir, "run.json");
+    writeFileSync(file, JSON.stringify({ socket: join(dir, "missing.sock"), ...(id === fresh ? { mirror: { driver: "other" } } : {}) }));
+    if (id === local) { const old = new Date(Date.now() - 8 * 86400_000); utimesSync(file, old, old); }
+    expect(await claimSlot(`step:${id}:a`, 2)).toBe(true);
+  }
+  expect(await gc({ days: 7 })).toEqual({ removed: [], mirrors: [] });
+  for (const id of [fresh, local]) expect(existsSync(join(process.env.SFLOW_HOME, "runs", id))).toBe(true);
+  expect(readdirSync(join(process.env.SFLOW_HOME, "slots"))).toHaveLength(2);
+});
 
 test("a slot whose runner died but whose command group lives is not reclaimed", async () => {
   process.env.SFLOW_HOME = join(base, "solo");

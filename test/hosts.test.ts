@@ -27,6 +27,9 @@ function git(cwd: string, ...args: string[]) {
 function host(name: string, extra: Partial<HostConfig> = {}): HostConfig {
   const home = join(base, `host-${name}`); mkdirSync(home, { recursive: true });
   const bin = join(home, "sflow"); writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${CLI} "$@"\n`); chmodSync(bin, 0o755);
+  // Placement checks the agent CLI exists on the host; tests must not depend on this machine's.
+  mkdirSync(join(home, "tools"), { recursive: true });
+  for (const t of ["codex", "tmux", "ocs"]) { writeFileSync(join(home, "tools", t), "#!/bin/sh\nexit 0\n"); chmodSync(join(home, "tools", t), 0o755); }
   return parseHost(name, { ssh: `loop-${name}`, bin, slots: 2, maxLoad: 16, minFreeGB: 0, ...extra });
 }
 beforeEach(() => {
@@ -40,7 +43,7 @@ beforeEach(() => {
 while [ $# -gt 1 ]; do case "$1" in -o|-J) shift 2;; -t) shift;; *) break;; esac; done
 target="$1"; shift; name="\${target#loop-}"
 [ -d "${base}/host-$name" ] || { echo "ssh: Could not resolve hostname $target" >&2; exit 255; }
-export HOME="${base}/host-$name" SFLOW_HOME="${base}/host-$name/state"
+export HOME="${base}/host-$name" SFLOW_HOME="${base}/host-$name/state" PATH="${base}/host-$name/tools:$PATH"
 exec sh -c "$*"
 `); chmodSync(shim, 0o755);
   process.env.SFLOW_SSH_BIN = shim;

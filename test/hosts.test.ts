@@ -941,7 +941,13 @@ test("input none cancellation closes its process group, cleans work and retains 
   await tick(run, rt, tr);
   const link = rt.link(run, "mini"), jobId = run.steps.a.job!.id;
   let started = false;
-  for (let i = 0; i < 100 && !started; i++) { started = !!(await link.call<any>("job-status", { jobId })).started; if (!started) await Bun.sleep(30); }
+  const count = join(base, "host-mini", "count");
+  for (let i = 0; i < 100 && !started; i++) {
+    const state = await link.call<any>("job-status", { jobId });
+    // started.json is written after spawn, before the child necessarily executes echo.
+    started = !!state.started && existsSync(count) && readFileSync(count, "utf8") === "x\n";
+    if (!started) await Bun.sleep(30);
+  }
   expect(started).toBe(true);
   await rt.cancelCommand(run, run.workflow.steps[0], "manual test cancellation");
   await until(run, rt, tr, () => run.status !== "running");

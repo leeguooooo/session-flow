@@ -5,7 +5,7 @@ import { OcsTransport } from "./ocs";
 import { preflight, requiredTools } from "./preflight";
 import { command } from "./process";
 import { address, gcTeams, listTeams, loadTeam, memberReady, reconcileTeam, roster, sendToMember, spawnMember, stopMember, TeamTmux,
-  waitingMenu, withTeam, type Member, type Team } from "./team";
+  validateSpawn, waitingMenu, withTeam, type Member, type Team } from "./team";
 
 const USAGE = `sflow team spawn <role> --agent claude|codex|pi [--team t] [--cwd dir] [--model m] [--write]
                  [--instructions "…" | --instructions-file f] [--no-wait] [--wait-seconds n] [--json]
@@ -70,9 +70,12 @@ export async function teamCommand(args: string[], cli: string[], transport = new
     if (!agent) throw new Error("--agent is required (claude, codex or pi)");
     if (text !== undefined && file !== undefined) throw new Error("use either --instructions or --instructions-file");
     if (!Number.isInteger(waitSeconds) || waitSeconds < 5 || waitSeconds > 600) throw new Error("--wait-seconds is 5 to 600");
+    const options = { team, role, agent, model, cwd, write, cli,
+      instructions: file !== undefined ? readFileSync(resolve(file), "utf8") : text, instructionsSource: file !== undefined ? resolve(file) : undefined };
+    // Clear rule errors (an unsupported agent, a bad role) before "not installed" ones.
+    validateSpawn(options);
     await preflight(requiredTools(tmux.binary, transport.binary, [agent]));
-    const { member } = await spawnMember({ team, role, agent, model, cwd, write, cli,
-      instructions: file !== undefined ? readFileSync(resolve(file), "utf8") : text, instructionsSource: file !== undefined ? resolve(file) : undefined }, tmux);
+    const { member } = await spawnMember(options, tmux);
     if (!json) console.error(`started ${role} (${member.agent}) in team ${team}; waiting for it to report ready…`);
     if (noWait) { if (json) console.log(JSON.stringify(publicMember(loadTeam(team), member), null, 2)); return 0; }
     // Readiness comes only from the member's own signed ready report. A menu on its screen (trust,

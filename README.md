@@ -235,6 +235,38 @@ machine's screen or browser profiles must not get a host. A host step also canno
 reach that host's desktop: it is a terminal session over SSH, and screen
 recording or GUI access there is not granted to it.
 
+## Teams: role sessions you talk to
+
+A workflow fixes the steps in advance. A team does not: start sessions with roles, then
+hand out work by message and step into any of them yourself. The lead is you, or any agent
+session (a Claude Code session you are already talking to works well).
+
+```sh
+sflow team spawn reviewer --agent codex --instructions "Review changes for races and missing tests."
+sflow team spawn tester --agent claude --write --instructions-file roles/tester.md
+sflow team ls                          # members, status, and how to reach each one
+sflow team send reviewer "Review the diff in src/parser.ts"
+sflow team logs reviewer               # or: sflow team attach reviewer
+sflow team stop --all; sflow team gc --apply
+```
+
+- `spawn` waits until the member reports ready and prints its OCS id; that report, signed
+  with a token only its own wrapper has, is the only thing that marks it ready. A trust or login
+  question on its screen is printed with `team attach` as the way to answer it; nothing answers
+  it for you or restarts the member.
+- `team send` pastes the message into the member's session with a `Reply: ocs dm <you> "…"`
+  line, so the member answers whoever sent it (from a plain terminal it answers in its own
+  session). It works for every agent. `ocs dm <OCS id>` also reaches Claude and Pi members
+  directly; it does **not** wake a Codex CLI session, so use `team send` for Codex.
+- Members are read-only unless `--write`, which lets them edit `cwd` in place (a Git checkout;
+  no worktree, changes stay uncommitted). The team defaults to `default`; `--team <name>` keeps
+  several apart.
+- There is no completion guarantee: whether something is done is the lead's call. A member
+  whose session disappears without `team stop` is shown as `uncertain` and never restarted.
+  Nothing expires on its own; `team gc` lists closed members and removes them with `--apply`.
+- Teams run on this machine only (no `host` yet), with claude, codex or pi. They are not counted
+  against a run's `concurrency`. Long-lived sessions use memory: stop the ones you are done with.
+
 ## Development
 
 ```sh

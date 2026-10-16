@@ -259,3 +259,65 @@ the run aside, deleting after. Known limit: the hour is a grace period, not a
 lease, so `--days 0` during a placement that takes longer than an hour (a huge
 evidence upload) can remove that mirror. Running
 command jobs (and uncertain ones) count toward `concurrency` together with sessions.
+
+## Teams: role sessions coordinated by message
+
+A team is a set of long-lived native sessions with roles, started one at a time with
+`sflow team spawn`. There is no workflow and no engine: a lead (a person, or any agent
+session) hands out work by message and judges whether it is done. **Teams carry no
+completion guarantee.** Nothing in `engine.ts` reads or drives a team, and a team never
+appears among runs.
+
+Split of responsibility. sflow starts a member, gives it its role, owns its private tmux
+session, records what it started and stops it. OCS keeps discovery, identity, messages and
+wakes. Nothing is added to OCS.
+
+Records live in `teams/<team>/team.json` with `kind: "sflow-team"` and their own
+`schemaVersion`, separate from runs: run tools never see them, and a record written by a
+newer sflow is refused rather than reinterpreted. Each team has its own private socket
+directory (`$TMPDIR/sf-t-<12 hex>/`, the same ownership checks as a run's) and its own lock,
+held only for short record changes, never while waiting for a member.
+
+A member's states are `launching`, `ready`, `closed` and `uncertain`.
+
+- `spawn` writes the member as `launching`, with `launch.attemptedAt`, before tmux is asked to
+  start anything. tmux is asked once. If it fails and no session exists, the member is
+  `closed` with the error; if whether it exists cannot be determined, it is `uncertain`.
+- The first prompt is the role and one instruction: run `<team>/<role>/member ready`. It
+  carries no task. Tasks come later by message, so an uncertain start never leads to a task
+  being sent twice.
+- `ready` runs through the member wrapper (the capability token travels there, because Codex
+  filters `*TOKEN*` variables). It checks the token, takes the native identity from
+  `ocs whoami`, and sends a ready event signed with the token on the team channel, from that
+  identity.
+- The driver marks a member `ready` only for such an event: valid proof, sender equal to the
+  claimed actor, actor shape matching the member's agent, the member still `launching`, its
+  tmux session present, and the actor not already bound to another open member. A later
+  report cannot rebind it. Neither `ocs who`, a session in the same directory, nor an idle
+  TUI counts.
+- Pane evidence is recorded with the ready event. If `$TMUX` names another tmux server, or
+  `$TMUX_PANE` belongs to another session or is dead, `ready` refuses. If the check cannot run,
+  the member is ready with `pane.verified: false` and the reason. Codex hides `TMUX` and
+  `TMUX_PANE` from the commands it runs, so Codex members are always in this case. This
+  guards against one session of the user being mistaken for another; it is not
+  authentication, and same-user processes can read the token, as for runs.
+- A `launching` or `ready` member whose session is gone without `team stop` becomes
+  `uncertain`. Nothing restarts it; `spawn` refuses that role until a person stops it.
+
+Messages. Claude members are started with `crossSessionInbound: accept` and Pi members wake
+through the OCS Pi extension, so `ocs dm <OCS id>` reaches them. OCS wakes a Codex session only
+when it is a task open in the desktop app, not a Codex CLI in tmux, so `sflow team send` is the
+path that works for every agent. It writes the message to the team channel first (if that
+fails, nothing was delivered), then pastes it into the member's pane once with an Enter. A paste
+that fails part-way is reported as uncertain and never retried. The pasted text names the
+sender's OCS id and a `Reply: ocs dm <sender> "…"` line; from a plain terminal there is no
+sender id and the member answers in its own session.
+
+`team stop` touches only the member's session on the team's socket, after saving its last
+2000 lines to `terminal.txt`. There is no idle or age expiry: a quiet member may be working.
+`team gc` lists closed members and empty teams, and removes them only with `--apply`.
+
+Team members are not counted against any run's `concurrency`, and there is no machine-wide slot
+count on this machine. Teams run on this machine only. Running members on hosts needs slot
+accounting and SSH-loss handling there, and is not offered yet. agy is excluded: it has no
+per-session identity, so two agy members could not be told apart.

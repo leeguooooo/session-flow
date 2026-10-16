@@ -6,13 +6,53 @@ import { sessionRoot } from "./config";
 import { saveRun } from "./store";
 import { stepWorkspace } from "./context";
 import { diagnoseScreen, parseMenu, type Menu } from "./prompt";
-import type { Run, Step, SessionRuntime } from "./types";
+import type { Agent, Run, Step, SessionRuntime } from "./types";
 
 // Claude's Bash rules match the command text, and the worker types the path quoted or bare
 // (both seen in real runs). Allow both spellings, but only the bare one when it needs no quoting.
-export function allowWorker(path: string, quoted: string): string {
+export function allowWorker(path: string, quoted: string, commands = ["task", "report *"]): string {
   const forms = /^[\w./-]+$/.test(path) && path !== quoted ? [quoted, path] : [quoted];
-  return forms.flatMap(f => [`Bash(${f} task)`, `Bash(${f} report *)`]).join(",");
+  return forms.flatMap(f => commands.map(c => `Bash(${f} ${c})`)).join(",");
+}
+
+const ocsHome = () => process.env.OCS_HOME ?? join(homedir(), ".ocs");
+// Claude workers accept OCS wakes from other sessions (a team member is woken by `ocs dm`).
+export function claudeSettings(dir: string): string {
+  const settings = join(dir, "claude-settings.json");
+  if (!existsSync(settings)) writeFileSync(settings, JSON.stringify({ permissions: { crossSessionInbound: "accept" } }), { mode: 0o600 });
+  return settings;
+}
+export interface NativeOptions {
+  model?: string;
+  prompt: string;
+  readOnly: boolean;
+  // Directories the agent may use besides its working directory (Codex: writable roots).
+  dirs: string[];
+  claude?: { settings: string; name: string; allowedTools: string; readDir?: string };
+}
+// The command line that starts an agent's native TUI with its first prompt.
+export function nativeArgv(agent: Agent, o: NativeOptions): string[] {
+  const dirs = o.dirs.flatMap(d => ["--add-dir", d]);
+  let argv: string[];
+  if (agent === "claude") {
+    const c = o.claude!;
+    argv = ["claude", "--permission-mode", "default", "--settings", c.settings, "--name", c.name, ...dirs, "--allowedTools", c.allowedTools];
+    if (o.readOnly) argv.push(...(c.readDir ? ["--add-dir", c.readDir] : []), "--disallowedTools", "Edit,Write,NotebookEdit");
+  } else if (agent === "pi") {
+    // Pi has no per-tool approvals: read-only removes its edit/write tools, but bash stays available.
+    argv = ["pi", ...(o.readOnly ? ["--exclude-tools", "edit,write"] : [])];
+  } else if (agent === "agy") {
+    // Antigravity keeps its own tool approvals; the given directories join its workspace.
+    argv = ["agy", ...dirs, ...(o.model ? ["--model", o.model] : []), "--prompt-interactive", o.prompt];
+    return argv;
+  } else {
+    argv = ["codex", "--no-alt-screen", "--no-daemon", "--sandbox", "workspace-write",
+      "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+      "--ask-for-approval", "on-request", ...dirs];
+  }
+  if (o.model) argv.push("--model", o.model);
+  argv.push("--", o.prompt);
+  return argv;
 }
 
 export class TmuxRuntime implements SessionRuntime {
@@ -87,36 +127,19 @@ Report once using ${cliText} report done '<summary>' (or failed/blocked), adding
     }
     let argv: string[];
     if (step.agent === "claude") {
-      const settings = join(commonCwd, "claude-settings.json");
-      if (!existsSync(settings)) writeFileSync(settings, JSON.stringify({ permissions: { crossSessionInbound: "accept" } }), { mode: 0o600 });
-      argv = ["claude", "--permission-mode", "default", "--settings", settings, "--name", `sflow-${step.id}`, "--add-dir", run.dir,
-        "--allowedTools", run.workflow.steps.filter(s => sessionRoot(run.workflow.steps, s) === sessionRoot(run.workflow.steps, step))
-          .map(s => { const p = join(run.dir, s.id, "worker"); return allowWorker(p, quote(p)); }).join(",")];
-      // A read-only step starts outside its project, so the project joins Claude's working
-      // directories; otherwise every read of it asks "outside the working directories".
-      if (step.policy === "read-only") argv.push("--add-dir", step.cwd, "--disallowedTools", "Edit,Write,NotebookEdit");
-      if (step.model) argv.push("--model", step.model);
-      argv.push("--", prompt);
-    } else if (step.agent === "pi") {
-      // Pi has no per-tool approvals: read-only removes its edit/write tools, but bash stays available.
-      argv = ["pi"];
-      if (step.policy === "read-only") argv.push("--exclude-tools", "edit,write");
-      if (step.model) argv.push("--model", step.model);
-      argv.push("--", prompt);
+      argv = nativeArgv("claude", { model: step.model, prompt, readOnly: step.policy === "read-only", dirs: [run.dir],
+        claude: { settings: claudeSettings(commonCwd), name: `sflow-${step.id}`,
+          allowedTools: run.workflow.steps.filter(s => sessionRoot(run.workflow.steps, s) === sessionRoot(run.workflow.steps, step))
+            .map(s => { const p = join(run.dir, s.id, "worker"); return allowWorker(p, quote(p)); }).join(","),
+          // A read-only step starts outside its project, so the project joins Claude's working
+          // directories; otherwise every read of it asks "outside the working directories".
+          readDir: step.cwd } });
     } else if (step.agent === "agy") {
-      // Antigravity keeps its own tool approvals; the protocol, step and OCS directories join its workspace.
-      argv = ["agy", "--add-dir", commonCwd, "--add-dir", dir, "--add-dir", process.env.OCS_HOME ?? join(homedir(), ".ocs")];
-      if (step.model) argv.push("--model", step.model);
-      argv.push("--prompt-interactive", prompt);
-    } else {
-      argv = ["codex", "--no-alt-screen", "--no-daemon", "--sandbox", "workspace-write",
-        "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
-        "--ask-for-approval", "on-request", "--add-dir", step.policy === "read-only" ? commonCwd : dir,
-        "--add-dir", commonCwd, "--add-dir", tmp,
-        "--add-dir", process.env.OCS_HOME ?? join(homedir(), ".ocs")];
-      if (step.model) argv.push("--model", step.model);
-      argv.push("--", prompt);
-    }
+      argv = nativeArgv("agy", { model: step.model, prompt, readOnly: step.policy === "read-only", dirs: [commonCwd, dir, ocsHome()] });
+    } else if (step.agent === "codex") {
+      argv = nativeArgv("codex", { model: step.model, prompt, readOnly: step.policy === "read-only",
+        dirs: [step.policy === "read-only" ? commonCwd : dir, commonCwd, tmp, ocsHome()] });
+    } else argv = nativeArgv(step.agent as Agent, { model: step.model, prompt, readOnly: step.policy === "read-only", dirs: [] });
     const env = cleanEnv();
     // Let native CLIs retain their auth/config paths. Remove only inherited
     // identity flags so OCS never attributes the worker to its creator.

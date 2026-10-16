@@ -24,6 +24,7 @@ import { templateCommand, configCommand, startPlan, describePlan, originSummary 
 import { HostRouter } from "./hostrun";
 import { hostsCommand, hostPreflight, freezeHosts } from "./hosts-cli";
 import { attach as remoteAttach, serve as remoteServe } from "./remote";
+import { teamCommand } from "./team-cli";
 import pkg from "../package.json";
 
 const cli = import.meta.path.includes("$bunfs") ? [process.execPath] : [process.execPath, import.meta.path];
@@ -100,6 +101,7 @@ sflow report --file <result.json>    worker: report done/blocked/failed
 sflow report done '<summary>' [--check …] [--artifact …] [--detail k=v]  worker: report (or failed/blocked)
 sflow report --json '<JSON>'         worker: report without writing a file
 sflow hosts list|add|remove|check|install  machines steps can run on over ssh (see sflow hosts)
+sflow team spawn|ls|send|logs|attach|stop|gc  long-lived role sessions coordinated by message (see sflow team)
 sflow remote <op>                    host side of a step on this machine (called over ssh)
 sflow skill install                 install the sflow skill for Claude Code, Codex, Pi and agy
 sflow upgrade [--check|--json]       install the latest release and refresh the skill
@@ -116,6 +118,7 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
     await remoteServe(arg, pkg.version, cli); return;
   }
   if (cmd === "hosts") { process.exitCode = await hostsCommand(args.slice(1), runtime); return; }
+  if (cmd === "team") { process.exitCode = await teamCommand(args.slice(1), cli); return; }
   if (cmd === UPDATE_CHECK_COMMAND) { await runUpdateCheck(); return; }
   if (cmd === "upgrade") {
     const flags = args.slice(1);

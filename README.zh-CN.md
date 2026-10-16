@@ -187,6 +187,25 @@ sflow hosts check                     # sflow 版本、工具、负载、剩余�
 
 GUI 操作、截图、用你钥匙串签名，以及任何用到本机屏幕或浏览器 profile 的事，都不能给 host。host 步骤也碰不到远端的桌面：它是 SSH 上的终端会话，没有那台机器的录屏和 GUI 权限。
 
+## 团队：可以对话的角色会话
+
+工作流把步骤提前定死，团队不是这样：先起几个带角色的会话，再用消息给它们派活，你也可以随时进到任何一个会话里插手。lead 就是你，或者任意一个 agent 会话（比如你正在用的 Claude Code 会话）。
+
+```sh
+sflow team spawn reviewer --agent codex --instructions "审查改动里的竞态和缺失的测试。"
+sflow team spawn tester --agent claude --write --instructions-file roles/tester.md
+sflow team ls                          # 成员、状态，以及怎么联系每一个
+sflow team send reviewer "看一下 src/parser.ts 的改动"
+sflow team logs reviewer               # 或者 sflow team attach reviewer
+sflow team stop --all; sflow team gc --apply
+```
+
+- `spawn` 会等到成员自己报告就绪，然后打印它的 OCS id。就绪只认这份报告，它用只有成员自己的 wrapper 才有的令牌签名。成员屏幕上出现信任或登录提问时，spawn 会把问题打印出来，告诉你用 `team attach` 去回答；不会替你回答，也不会重启成员。
+- `team send` 把消息粘贴进成员的会话，末尾带一行 `Reply: ocs dm <你> "…"`，成员就回复给发消息的人（从普通终端发时没有发送方 id，成员在自己的会话里回答）。所有 agent 都能用。Claude 和 Pi 成员也能直接用 `ocs dm <OCS id>` 找到；Codex CLI 会话**不会**被 `ocs dm` 唤醒，所以 Codex 用 `team send`。
+- 成员默认只读；加 `--write` 后直接在 `cwd` 里改文件（必须是 Git 仓库；没有 worktree，改动保持未提交）。团队名默认是 `default`，多个团队用 `--team <名字>` 区分。
+- 没有完成保证：做没做完由 lead 判断。会话在没执行 `team stop` 的情况下没了，成员显示为 `uncertain`，不会被重启。没有自动过期；`team gc` 列出已关闭的成员，加 `--apply` 才删除。
+- 团队只在本机运行（暂不支持 `host`），agent 可选 claude、codex、pi。成员不计入任何 run 的 `concurrency`。长期会话会占内存，用完的及时停掉。
+
 ## 开发
 
 ```sh

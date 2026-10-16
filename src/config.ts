@@ -4,14 +4,14 @@ import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { AGENTS, type Agent, type Scalar, type Step, type Workflow } from "./types";
 
-function physical(path: string): string {
+export function physical(path: string): string {
   const p = resolve(path);
   try { return realpathSync(p); } catch {
     const parent = dirname(p);
     return parent === p ? p : join(physical(parent), basename(p));
   }
 }
-const ID = /^[a-z][a-z0-9-]{0,39}$/;
+export const ID = /^[a-z][a-z0-9-]{0,39}$/;
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("expected an object");
   return value as Record<string, unknown>;

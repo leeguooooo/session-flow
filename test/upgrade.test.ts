@@ -27,6 +27,23 @@ test("latest release lookup never throws and honours GITHUB_TOKEN", async () => 
   expect("error" in await fetchLatest({ SFLOW_UPGRADE_LATEST_URL: "http://127.0.0.1:1/x" })).toBe(true);
 });
 
+test("the release page redirect names the latest version without the API, which stays the fallback", async () => {
+  let location = "https://github.com/x/y/releases/tag/v0.3.1", pageHits = 0;
+  const page = Bun.serve({ port: 0, fetch() { pageHits++; return new Response(null, { status: location ? 302 : 404, headers: location ? { location } : {} }); } });
+  try {
+    const pageUrl = `http://127.0.0.1:${page.port}/releases/latest`;
+    tag = "v0.2.0"; status = 403;
+    expect(await fetchLatest({ SFLOW_UPGRADE_PAGE_URL: pageUrl, SFLOW_UPGRADE_LATEST_URL: url })).toEqual({ version: "0.3.1" });
+    location = ""; status = 200;
+    expect(await fetchLatest({ SFLOW_UPGRADE_PAGE_URL: pageUrl, SFLOW_UPGRADE_LATEST_URL: url })).toEqual({ version: "0.2.0" });
+    status = 403;
+    expect(await fetchLatest({ SFLOW_UPGRADE_PAGE_URL: pageUrl, SFLOW_UPGRADE_LATEST_URL: url })).toEqual({ error: "release page: HTTP 404 without a release redirect; API: HTTP 403" });
+    location = "https://github.com/x/y/releases/tag/nightly";
+    expect("error" in await fetchLatest({ SFLOW_UPGRADE_PAGE_URL: pageUrl, SFLOW_UPGRADE_LATEST_URL: url })).toBe(true);
+    expect(pageHits).toBe(4);
+  } finally { page.stop(true); status = 200; tag = "v0.2.0"; }
+});
+
 test("upgrade runs the installer only when a newer release exists", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sf-upgrade-")), marker = join(dir, "ran");
   const installer = join(dir, "install.sh"); writeFileSync(installer, `echo ran > ${marker}\n`);

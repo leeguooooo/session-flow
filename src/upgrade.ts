@@ -24,8 +24,30 @@ export function newer(latest: string, current: string): boolean {
   return false;
 }
 
-// Any failure (offline, rate limit, odd payload) is an error value, never a throw.
+// Any failure (offline, rate limit, odd payload) is an error value, never a throw. The release
+// page's redirect comes first: it names the latest tag without touching the API, whose anonymous
+// limit (60 an hour per IP) is easily spent by other tools behind the same address.
 export async function fetchLatest(env: NodeJS.ProcessEnv = process.env, timeoutMs = 3000): Promise<{ version: string } | { error: string }> {
+  const page = env.SFLOW_UPGRADE_PAGE_URL || (env.SFLOW_UPGRADE_LATEST_URL ? "" : `https://github.com/${REPO}/releases/latest`);
+  if (!page) return fetchLatestApi(env, timeoutMs);
+  const viaPage = await fetchLatestPage(page, timeoutMs);
+  if ("version" in viaPage) return viaPage;
+  const viaApi = await fetchLatestApi(env, timeoutMs);
+  return "version" in viaApi ? viaApi : { error: `release page: ${viaPage.error}; API: ${viaApi.error}` };
+}
+async function fetchLatestPage(url: string, timeoutMs: number): Promise<{ version: string } | { error: string }> {
+  try {
+    const response = await fetch(url, { headers: { "user-agent": "sflow-upgrade" }, redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
+    const tag = decodeURIComponent(/\/releases\/tag\/([^/?#]+)/.exec(response.headers.get("location") ?? "")?.[1] ?? "");
+    if (!tag) return { error: `HTTP ${response.status} without a release redirect` };
+    if (!parseVersion(tag)) return { error: `unexpected release tag ${JSON.stringify(tag)}` };
+    return { version: tag.replace(/^v/, "") };
+  } catch (e) {
+    const err = e as Error;
+    return { error: err.name === "TimeoutError" ? `timed out after ${timeoutMs}ms` : err.message };
+  }
+}
+async function fetchLatestApi(env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ version: string } | { error: string }> {
   const url = env.SFLOW_UPGRADE_LATEST_URL || `https://api.github.com/repos/${REPO}/releases/latest`;
   const headers: Record<string, string> = { "user-agent": "sflow-upgrade", accept: "application/vnd.github+json" };
   if (env.GITHUB_TOKEN) headers.authorization = `Bearer ${env.GITHUB_TOKEN}`;

@@ -173,6 +173,7 @@ sflow hosts check                     # sflow 版本、工具、负载、剩余�
   "workspace": "implement", "command": ["bun", "test"], "artifacts": ["coverage/summary.txt"] }
 ```
 
+- `cwd` 是本机路径，必须在一个至少有一次提交的 Git 仓库里；远端不需要有这个路径。`cwd` 是普通目录的 host 步骤或 command 步骤，`validate`、`doctor` 和 `run` 都会直接报错。
 - 远端拿到的是文件的冻结副本：已跟踪和未跟踪、未被忽略的文件，包括未提交的修改。被忽略的文件不发送；不支持 submodule 和 Git LFS。你仓库的 HEAD、index 和对象库都不会被写入，也不会推到 `origin`。
 - 只有每核负载低于 `--max-load`（默认 0.8）、剩余磁盘高于 `--min-free-gb`（默认 5）时才会用这台机器。`--slots`（默认 2）限制那台机器上同时跑几个步骤，所有往这台机器派任务的人共用。
 - 带 host 的步骤不会退回本机跑。任务开始后主机失联，步骤记为 `uncertain`，不会重跑，也不会换机器。
@@ -184,7 +185,7 @@ sflow hosts check                     # sflow 版本、工具、负载、剩余�
 - 模板里也能写 `host` 和 command 步骤；`sflow start --host <步骤>=<主机>[,<主机>…]` 可以为这一次 run 改某个步骤的主机。
 - `sflow hosts gc [--days 7]` 清理主机上已结束的 command 任务。
 
-GUI 操作、截图、用你钥匙串签名，以及任何用到本机屏幕或浏览器 profile 的事，都不能给 host。
+GUI 操作、截图、用你钥匙串签名，以及任何用到本机屏幕或浏览器 profile 的事，都不能给 host。host 步骤也碰不到远端的桌面：它是 SSH 上的终端会话，没有那台机器的录屏和 GUI 权限。
 
 ## 开发
 

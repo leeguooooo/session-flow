@@ -71,7 +71,10 @@ export class HostRouter implements SessionRuntime {
     await push(frozen.root, this.objects(run), link.gitUrl(path), commit, ref, link.gitEnv());
   }
   // What a reader on another machine sees: the files of a checkout or worktree, frozen now.
-  private async freezeLocal(run: Run, cwd: string) { return freeze(cwd, this.objects(run)); }
+  private async freezeLocal(run: Run, cwd: string) {
+    try { return await freeze(cwd, this.objects(run)); }
+    catch (e) { throw new LocalSource(`cannot snapshot ${cwd} on this machine: ${(e as Error).message}`); }
+  }
   private hostOf(run: Run, step: Step): string | undefined {
     // Chains stay where they started.
     const anchor = step.reuseSession ? sessionRoot(run.workflow.steps, step) : step.workspace ? workspaceRoot(run.workflow.steps, step) : undefined;
@@ -97,6 +100,9 @@ export class HostRouter implements SessionRuntime {
         if (r === "ready") return { ok: true };
         reasons.push(`${name} has no free slot`);
       } catch (e) {
+        // A source this machine cannot snapshot fails the same way on every host, before any host
+        // was asked for anything: never wait for one.
+        if (e instanceof LocalSource) { if (!tries) { delete s.host; delete s.remote; } s.error = e.message; saveRun(run); return { error: e.message }; }
         reasons.push((e as Error).message);
         // Only a first round may give its session's slot back; a continuation's slot belongs to the
         // retained worker it continues.
@@ -488,6 +494,7 @@ export class HostRouter implements SessionRuntime {
   }
 }
 export class NotSent extends Error { readonly notSent = true; }
+export class LocalSource extends Error { readonly localSource = true; }
 function ancestors(run: Run, step: Step, seen = new Set<string>()): string[] {
   for (const d of step.dependsOn) if (!seen.has(d)) { seen.add(d); ancestors(run, run.workflow.steps.find(x => x.id === d)!, seen); }
   return [...seen];

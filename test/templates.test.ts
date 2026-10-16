@@ -167,6 +167,9 @@ test("start requires explicit in-place authorization each time and transforms wo
 
 test("templates carry command steps and hosts; --host overrides a step's host", () => {
   const { cwd } = fixture();
+  // A step with a host needs cwd inside a Git checkout with a commit.
+  for (const args of [["init", "-q"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]])
+    expect(Bun.spawnSync(["git", "-C", cwd, ...args]).exitCode).toBe(0);
   saved(cwd, { ...template(), steps: [
     { id: "look", role: "fix", cwd: ".", prompt: "Task {{task}}", host: "box" },
     { id: "test", cwd: ".", dependsOn: ["look"], command: ["bun", "test"], artifacts: ["out.txt"], host: ["box", "mini"] },

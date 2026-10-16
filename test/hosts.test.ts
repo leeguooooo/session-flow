@@ -219,6 +219,31 @@ test("workflow rules for hosts and command steps", () => {
   expect(unfit("x", h, { ...hello, protocol: 99 })).toContain("protocol");
 });
 
+test("a step with a host needs cwd inside a Git checkout with a commit", () => {
+  const plain = join(base, "plain"); mkdirSync(plain);
+  const empty = join(base, "empty"); mkdirSync(empty); git(empty, "init", "-q");
+  const wf = (cwd: string, extra: object = {}) => parseWorkflow({ version: 1, name: "t", steps: [{ id: "inspect", agent: "codex", prompt: "x", host: "mini", cwd, ...extra }] }, base);
+  expect(() => wf(plain)).toThrow("inspect: a step with a host runs on a snapshot of cwd's Git checkout");
+  expect(() => wf(empty)).toThrow("not inside a Git repository with a commit");
+  expect(() => wf(plain, { agent: "command", command: ["true"], prompt: undefined })).toThrow("Git checkout");
+  expect(() => wf(plain, { agent: "command", command: ["true"], prompt: undefined, host: undefined })).toThrow("inspect: a command step runs on a snapshot");
+  expect(wf(join(project)).steps[0].host).toEqual(["mini"]);
+  // Without a host a plain directory stays fine for a read-only step.
+  expect(wf(plain, { host: undefined }).steps[0].cwd).toBe(plain);
+});
+
+test("a cwd this machine cannot snapshot blocks the step instead of waiting for a host", async () => {
+  const run = setup([{ id: "inspect", agent: "codex", prompt: "x", host: "mini" }], { mini: host("mini") });
+  const plain = join(base, "plain"); mkdirSync(plain);
+  run.workflow.steps[0].cwd = plain;
+  await tick(run, router(), new NoTransport());
+  const s = run.steps.inspect;
+  expect(s.status).toBe("blocked");
+  expect(s.error).toContain(`cannot snapshot ${plain} on this machine`);
+  expect(s.error).not.toContain("waiting for a host");
+  expect(s.host).toBeUndefined();
+}, 60_000);
+
 test("hosts named by a workflow are frozen into the run", () => {
   mkdirSync(process.env.SFLOW_CONFIG_HOME!, { recursive: true });
   writeFileSync(join(process.env.SFLOW_CONFIG_HOME!, "hosts.json"), JSON.stringify({ version: 1, hosts: { a: { ssh: "x@a" }, b: { ssh: "x@b" }, c: { ssh: "x@c" } } }));

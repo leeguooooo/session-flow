@@ -236,7 +236,8 @@ test("a cwd this machine cannot snapshot blocks the step instead of waiting for 
   const run = setup([{ id: "inspect", agent: "codex", prompt: "x", host: "mini" }], { mini: host("mini") });
   const plain = join(base, "plain"); mkdirSync(plain);
   run.workflow.steps[0].cwd = plain;
-  await tick(run, router(), new NoTransport());
+  const rt = router(); rt.local.exists = async () => false; // no tmux needed
+  await tick(run, rt, new NoTransport());
   const s = run.steps.inspect;
   expect(s.status).toBe("blocked");
   expect(s.error).toContain(`cannot snapshot ${plain} on this machine`);

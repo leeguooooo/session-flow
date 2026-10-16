@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { parseWorkflow } from "../src/config";
-import { tmuxWorks } from "./tmux";
+import { tmuxTest } from "./tmux";
 import { createRun, saveRun } from "../src/store";
 import { tick, reconcile } from "../src/engine";
 import { HostRouter } from "../src/hostrun";
@@ -425,7 +425,7 @@ test("gc keeps fresh mirrors and old runs driven on this host", async () => {
   expect(readdirSync(join(process.env.SFLOW_HOME, "slots"))).toHaveLength(2);
 });
 
-test.skipIf(!tmuxWorks)("gc keeps an old mirror with a real live tmux worker", async () => {
+tmuxTest("gc keeps an old mirror with a real live tmux worker", async () => {
   process.env.SFLOW_HOME = join(base, "solo");
   const run = gcRun("00000000-0000-0000-0000-000000000004");
   const file = join(run.dir, "run.json"), old = new Date(Date.now() - 8 * 86400_000);

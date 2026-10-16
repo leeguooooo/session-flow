@@ -10,13 +10,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - platform: darwin-arm64
+          - os: darwin
             runner: macos-14
-          - platform: darwin-x64
-            runner: macos-14
-          - platform: linux-x64
-            runner: ubuntu-latest
-          - platform: linux-arm64
+          - os: linux
             runner: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,22 +23,25 @@ jobs:
       - run: bun test && bun run check
       - name: Compile and package
         env:
-          PLATFORM: ${{ matrix.platform }}
+          TARGET_OS: ${{ matrix.os }}
         run: |
           mkdir -p release
-          bun build --compile --target="bun-$PLATFORM" src/cli.ts --outfile release/sflow
-          case "$PLATFORM" in
-            darwin-*) codesign --force --sign - release/sflow; codesign --verify --strict release/sflow ;;
-          esac
-          tar -C release -czf "sflow-$PLATFORM.tar.gz" sflow
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "sflow-$PLATFORM.tar.gz" > "sflow-$PLATFORM.tar.gz.sha256"
-          else
-            shasum -a 256 "sflow-$PLATFORM.tar.gz" > "sflow-$PLATFORM.tar.gz.sha256"
-          fi
+          for arch in arm64 x64; do
+            platform="$TARGET_OS-$arch"
+            bun build --compile --target="bun-$platform" src/cli.ts --outfile release/sflow
+            case "$platform" in
+              darwin-*) codesign --force --sign - release/sflow; codesign --verify --strict release/sflow ;;
+            esac
+            tar -C release -czf "sflow-$platform.tar.gz" sflow
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "sflow-$platform.tar.gz" > "sflow-$platform.tar.gz.sha256"
+            else
+              shasum -a 256 "sflow-$platform.tar.gz" > "sflow-$platform.tar.gz.sha256"
+            fi
+          done
       - uses: actions/upload-artifact@v4
         with:
-          name: sflow-${{ matrix.platform }}
+          name: sflow-${{ matrix.os }}
           path: sflow-*.tar.gz*
   publish:
     needs: build

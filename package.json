@@ -6,6 +6,7 @@
   "bin": { "sflow": "src/cli.ts" },
   "scripts": {
     "test": "bun test",
+    "test:tmux": "SFLOW_TEST_REQUIRE_TMUX=1 bun test --test-name-pattern '\\[tmux\\]'",
     "check": "tsc --noEmit",
     "bench:context": "bun scripts/context-benchmark.ts",
     "build": "bun build --compile src/cli.ts --outfile dist/sflow"

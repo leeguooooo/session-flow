@@ -6,7 +6,7 @@ import { gcTeams, loadTeam, memberReady, readyProof, reconcileTeam, saveTeam, se
   type Member, type ReadyEvent, type Team } from "../src/team";
 import { OcsTransport } from "../src/ocs";
 import type { Message, Transport } from "../src/types";
-import { tmuxWorks } from "./tmux";
+import { tmuxTest } from "./tmux";
 
 const CLI = join(import.meta.dir, "..", "src", "cli.ts");
 const saved = { ...process.env };
@@ -195,7 +195,7 @@ test("a team record from a newer sflow is refused, not reinterpreted", async () 
 
 // The whole path in a real tmux server: a fake codex that runs the member wrapper's ready from
 // inside its pane, a fake ocs that stores channel rows, then a paste and a stop.
-test.skipIf(!tmuxWorks)("a real member reports ready from its own pane, receives a paste and is stopped", async () => {
+tmuxTest("a real member reports ready from its own pane, receives a paste and is stopped", async () => {
   const bin = join(base, "bin"), out = join(base, "out"); mkdirSync(bin); mkdirSync(out);
   writeFileSync(join(bin, "codex"), `#!/bin/sh
 for a; do last="$a"; done

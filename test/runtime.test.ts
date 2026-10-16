@@ -7,7 +7,7 @@ import { createRun } from "../src/store";
 import { TmuxRuntime } from "../src/runtime";
 import { cleanEnv, command } from "../src/process";
 import { parseMenu, menuKeys } from "../src/prompt";
-import { tmuxWorks } from "./tmux";
+import { tmuxTest } from "./tmux";
 
 const cleanup: string[] = [];
 const oldPath = process.env.PATH;
@@ -23,7 +23,7 @@ test("inherited runtime identity is removed without discarding auth/config", () 
   try { const e = cleanEnv(); expect(e.TMUX).toBeUndefined(); expect(e.CODEX_THREAD_ID).toBeUndefined(); expect(e.SFLOW_TOKEN).toBeUndefined(); expect(e.CODEX_HOME).toBe("/config"); }
   finally { for (const k of Object.keys(keys)) { if (original[k] === undefined) delete process.env[k]; else process.env[k] = original[k]; } }
 });
-test.skipIf(!tmuxWorks)("real tmux sessions forward model safely and isolate per-worker context", async () => {
+tmuxTest("real tmux sessions forward model safely and isolate per-worker context", async () => {
   const root = mkdtempSync(join(tmpdir(), "sf-runtime-")); cleanup.push(root);
   const bin = join(root, "bin"), project = join(root, "project"); mkdirSync(bin); mkdirSync(project);
   process.env.SFLOW_HOME = join(root, "state"); process.env.PATH = bin + ":" + oldPath;
@@ -54,7 +54,7 @@ test.skipIf(!tmuxWorks)("real tmux sessions forward model safely and isolate per
   } finally { for (const step of run.workflow.steps) await rt.stop(run, step.id); }
 });
 
-test.skipIf(!tmuxWorks)("pi and agy start their native TUIs with the step's model and policy", async () => {
+tmuxTest("pi and agy start their native TUIs with the step's model and policy", async () => {
   const root = mkdtempSync(join(tmpdir(), "sf-runtime-")); cleanup.push(root);
   const bin = join(root, "bin"), project = join(root, "project"); mkdirSync(bin); mkdirSync(project);
   process.env.SFLOW_HOME = join(root, "state"); process.env.PATH = bin + ":" + oldPath;
@@ -86,7 +86,7 @@ test("workflows accept pi and agy steps and reject unknown agents", () => {
   expect(() => wf("hermes")).toThrow("agent must be one of claude, codex, pi, agy");
 });
 
-test.skipIf(!tmuxWorks)("a waiting menu is read from the pane and answered with keys", async () => {
+tmuxTest("a waiting menu is read from the pane and answered with keys", async () => {
   const root = mkdtempSync(join(tmpdir(), "sf-runtime-")); cleanup.push(root);
   const bin = join(root, "bin"), project = join(root, "project"); mkdirSync(bin); mkdirSync(project);
   process.env.SFLOW_HOME = join(root, "state"); process.env.PATH = bin + ":" + oldPath;
@@ -106,7 +106,7 @@ test.skipIf(!tmuxWorks)("a waiting menu is read from the pane and answered with 
   } finally { await rt.stop(run, "a"); }
 });
 
-test.skipIf(!tmuxWorks)("a read-only Claude step starts in the shared workspace with its project as a working directory", async () => {
+tmuxTest("a read-only Claude step starts in the shared workspace with its project as a working directory", async () => {
   const root = mkdtempSync(join(tmpdir(), "sf-runtime-")); cleanup.push(root);
   const bin = join(root, "bin"), project = join(root, "project"); mkdirSync(bin); mkdirSync(project);
   process.env.SFLOW_HOME = join(root, "state"); process.env.PATH = bin + ":" + oldPath;
@@ -130,7 +130,7 @@ test("Claude may run its worker command with the path quoted or bare", async () 
   expect(allowWorker("/a b/worker", "'/a b/worker'")).toBe("Bash('/a b/worker' task),Bash('/a b/worker' report *)");
 });
 
-test.skipIf(!tmuxWorks)("continuation sends the new wrapper to the same native process without creating another session", async () => {
+tmuxTest("continuation sends the new wrapper to the same native process without creating another session", async () => {
   const root = mkdtempSync(join(tmpdir(), "sf-continue-")); cleanup.push(root);
   const bin = join(root, "bin"), project = join(root, "project"); mkdirSync(bin); mkdirSync(project);
   process.env.SFLOW_HOME = join(root, "state"); process.env.PATH = bin + ":" + oldPath;

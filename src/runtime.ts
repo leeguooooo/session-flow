@@ -10,9 +10,9 @@ import type { Agent, Run, Step, SessionRuntime } from "./types";
 
 // Claude's Bash rules match the command text, and the worker types the path quoted or bare
 // (both seen in real runs). Allow both spellings, but only the bare one when it needs no quoting.
-export function allowWorker(path: string, quoted: string): string {
+export function allowWorker(path: string, quoted: string, commands = ["task", "report *"]): string {
   const forms = /^[\w./-]+$/.test(path) && path !== quoted ? [quoted, path] : [quoted];
-  return forms.flatMap(f => [`Bash(${f} task)`, `Bash(${f} report *)`]).join(",");
+  return forms.flatMap(f => commands.map(c => `Bash(${f} ${c})`)).join(",");
 }
 
 const ocsHome = () => process.env.OCS_HOME ?? join(homedir(), ".ocs");

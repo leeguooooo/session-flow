@@ -39,8 +39,10 @@ export function loadRun(id: string): Run {
   }
   return run;
 }
-export function lockRun(run: Run): () => void {
-  const path = join(run.dir, "driver.lock");
+export function lockRun(run: Run): () => void { return lockDir(run.dir); }
+// One driver per record directory. A lock left by a dead process is taken over atomically.
+export function lockDir(dir: string, file = "driver.lock"): () => void {
+  const path = join(dir, file);
   try {
     const fd = openSync(path, "wx", 0o600);
     writeFileSync(fd, String(process.pid)); closeSync(fd);
@@ -54,7 +56,7 @@ export function lockRun(run: Run): () => void {
         if (existsSync(claim)) throw new Error("driver lock recovery already in progress");
         try { mkdirSync(claim, { mode: 0o700 }); } catch { throw new Error("driver lock recovery already in progress"); }
         try { unlinkSync(path); } finally { /* retained tombstone prevents competing takeover */ }
-        const release = lockRun(run);
+        const release = lockDir(dir, file);
         return () => { release(); requireRemoveDir(claim); };
       }
       throw err;

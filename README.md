@@ -198,6 +198,9 @@ artifacts, no agent involved.
   "workspace": "implement", "command": ["bun", "test"], "artifacts": ["coverage/summary.txt"] }
 ```
 
+- `cwd` is a path on this machine, inside a Git checkout with at least one
+  commit; the host never needs that path. `validate`, `doctor` and `run` reject a
+  host or command step whose `cwd` is a plain directory.
 - The host gets a frozen copy of the files: tracked and untracked, non-ignored
   ones, including uncommitted edits. Ignored files are not sent;
   submodules and Git LFS are not supported. Your repository's HEAD, index and object store
@@ -228,7 +231,9 @@ artifacts, no agent involved.
 - `sflow hosts gc [--days 7]` deletes finished command jobs on the hosts.
 
 GUI work, screenshots, signing with your keychain, or anything using this
-machine's screen or browser profiles must not get a host.
+machine's screen or browser profiles must not get a host. A host step also cannot
+reach that host's desktop: it is a terminal session over SSH, and screen
+recording or GUI access there is not granted to it.
 
 ## Development
 

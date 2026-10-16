@@ -72,6 +72,12 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
       const git = spawnSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
       if (git.status !== 0 || realpathSync(git.stdout.trim()) !== realpathSync(cwd)) throw new Error(`${s.id}: inPlace cwd must be the Git checkout root`);
     }
+    if (host || isCommand) {
+      // cwd is a path on this machine; hosts and command jobs get a frozen copy of its Git checkout,
+      // so a plain directory is a configuration error, not something a host can fix.
+      const git = spawnSync("git", ["-C", cwd, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"], { encoding: "utf8" });
+      if (git.status !== 0) throw new Error(`${s.id}: a ${host ? "step with a host" : "command step"} runs on a snapshot of cwd's Git checkout, and ${cwd} (a path on this machine) is not inside a Git repository with a commit; use a Git checkout as cwd${host && !isCommand ? ", or drop host to run it here" : ""}`);
+    }
     if (s.reuseSession !== undefined && (typeof s.reuseSession !== "string" || !ID.test(s.reuseSession))) throw new Error(`${s.id}: reuseSession must be a step id`);
     if (s.worktree !== undefined && typeof s.worktree !== "boolean") throw new Error(`${s.id}: worktree must be boolean`);
     if (s.workspace !== undefined && (typeof s.workspace !== "string" || !ID.test(s.workspace))) throw new Error(`${s.id}: workspace must be a step id`);

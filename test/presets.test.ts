@@ -61,6 +61,9 @@ test("--test gates every write round and --host places roles", () => {
   // The gated preset passes normal validation (from a directory outside sflow's state, wherever
   // this suite itself runs).
   const dir = mkdtempSync(join(tmpdir(), "sf-preset-"));
+  // Command steps run on a snapshot of a Git checkout with a commit.
+  for (const args of [["init", "-q"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]])
+    expect(Bun.spawnSync(["git", "-C", dir, ...args]).exitCode).toBe(0);
   try { parseWorkflow(buildPreset("implement-review-fix", { task: "t", cwd: dir, write: true, test: "true" }), dir); }
   finally { rmSync(dir, { recursive: true, force: true }); }
 });

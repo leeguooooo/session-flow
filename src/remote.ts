@@ -124,7 +124,7 @@ export function hello(version: string): Hello {
 }
 
 // ---- command jobs ----
-interface JobSpec { jobId: string; repo: string; commit: string; tree: string; argv: string[]; artifacts: string[]; slots: number; cwd: string }
+interface JobSpec { jobId: string; input?: "none" | "snapshot"; repo?: string; commit?: string; tree?: string; argv: string[]; artifacts: string[]; slots: number; cwd: string }
 function jobSpec(o: any): JobSpec {
   if (!o || !JOB.test(o.jobId)) throw new Error("invalid job id");
   if (!Array.isArray(o.argv) || !o.argv.length || o.argv.some((a: unknown) => typeof a !== "string")) throw new Error("invalid argv");
@@ -132,6 +132,11 @@ function jobSpec(o: any): JobSpec {
   if (!Number.isInteger(o.slots) || o.slots < 1) throw new Error("invalid slots");
   const cwd = o.cwd ?? ".";
   if (typeof cwd !== "string" || (cwd !== "." && !safeRelative(cwd))) throw new Error("invalid cwd");
+  if (o.input !== undefined && o.input !== "snapshot" && o.input !== "none") throw new Error("invalid input mode");
+  if (o.input === "none") {
+    if (o.repo !== undefined || o.commit !== undefined || o.tree !== undefined || o.artifacts.length || cwd !== ".") throw new Error("input: none needs an empty directory, without snapshot or artifacts");
+    return { jobId: o.jobId, input: "none", argv: o.argv, artifacts: [], slots: o.slots, cwd: "." };
+  }
   bareRepo(dataHome(), o.repo);
   return { jobId: o.jobId, repo: o.repo, commit: o.commit, tree: o.tree, argv: o.argv, artifacts: o.artifacts, slots: o.slots, cwd };
 }
@@ -179,13 +184,19 @@ function collect(work: string, out: string, wanted: string[]) {
 }
 export async function jobExec(id: string) {
   const dir = jobDir(id), spec = jobSpec(readJSON(join(dir, "spec.json")));
-  const work = join(dir, "work"), bare = bareRepo(dataHome(), spec.repo);
+  const work = join(dir, "work"), bare = spec.input === "none" ? undefined : bareRepo(dataHome(), spec.repo!);
+  const clean = async () => {
+    if (bare) await command(["git", "-C", bare, "worktree", "remove", "--force", work], { timeoutMs: 300_000 }).catch(() => {});
+    else rmSync(work, { recursive: true, force: true });
+  };
   const finish = (exit: Record<string, unknown>) => withLock(() => { atomicWrite(join(dir, "exit.json"), { ...exit, finishedAt: Date.now() }); releaseLocked(`job:${id}`); });
   const cancelled = () => readJSON(join(dir, "cancel.json"));
   if (cancelled()) return finish({ code: null, signal: null, error: "cancelled before it started" });
   try {
-    await verifyCommit(bare, spec.commit, spec.tree);
-    await checked(["git", "-C", bare, "worktree", "add", "--quiet", "--detach", work, spec.commit], { timeoutMs: 600_000 });
+    if (bare) {
+      await verifyCommit(bare, spec.commit!, spec.tree!);
+      await checked(["git", "-C", bare, "worktree", "add", "--quiet", "--detach", work, spec.commit!], { timeoutMs: 600_000 });
+    } else mkdirSync(work, { mode: 0o700 });
   } catch (e) { return finish({ code: null, signal: null, error: `checkout failed: ${(e as Error).message}` }); }
   const cwd = join(work, spec.cwd);
   const inside = relative(realpathSync(work), (() => { try { return realpathSync(cwd); } catch { return cwd; } })());
@@ -203,19 +214,19 @@ export async function jobExec(id: string) {
       child.on("error", e => res({ code: null, signal: null, error: `cannot start ${spec.argv[0]}: ${e.message}` }));
       child.on("exit", (code, signal) => res({ code, signal }));
     });
-    if (child.pid) atomicWrite(join(dir, "started.json"), { pid: child.pid, pgid: child.pid, startedAt: Date.now(), host: hostname(), arch: process.arch, platform: process.platform });
+    if (child.pid) atomicWrite(join(dir, "started.json"), { pid: child.pid, pgid: child.pid, cwd, startedAt: Date.now(), host: hostname(), arch: process.arch, platform: process.platform });
     return { done };
   });
   if (!exited) {
-    await command(["git", "-C", bare, "worktree", "remove", "--force", work], { timeoutMs: 300_000 }).catch(() => {});
+    await clean();
     return finish({ code: null, signal: null, error: "cancelled before it started" });
   }
   const result = await exited.done;
   try {
-    const out = collect(cwd, join(dir, "out"), spec.artifacts);
+    const out = spec.input === "none" ? { files: [], missing: [] } : collect(cwd, join(dir, "out"), spec.artifacts);
     atomicWrite(join(dir, "artifacts.json"), out);
   } catch (e) { atomicWrite(join(dir, "artifacts.json"), { files: [], missing: [{ path: "*", error: (e as Error).message }] }); }
-  await command(["git", "-C", bare, "worktree", "remove", "--force", work], { timeoutMs: 300_000 }).catch(() => {});
+  await clean();
   await finish(result);
 }
 export function jobStatus(input: any) {
@@ -551,6 +562,10 @@ export async function serve(op: string, version: string, cli: string[]): Promise
   const transport = new OcsTransport();
   switch (op) {
     case "hello": return out(hello(version));
+    case "command-check": {
+      if (typeof input.program !== "string" || !input.program || (!isAbsolute(input.program) && input.program.includes("/"))) throw new Error("expected a program on PATH or an absolute path");
+      return out({ path: Bun.which(input.program) });
+    }
     case "repo": { const path = bareRepo(dataHome(), input.repo); await ensureBare(path); return out({ path }); }
     case "job-start": return out(await jobStart(input, cli));
     case "job-exec": return jobExec(process.argv[process.argv.length - 1]);

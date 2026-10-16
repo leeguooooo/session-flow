@@ -1,5 +1,5 @@
 import { test, expect, afterAll } from "bun:test";
-import { mkdtempSync, writeFileSync, chmodSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, rmSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { doctor, renderChecks } from "../src/doctor";
@@ -34,4 +34,15 @@ test("doctor reports versions, sign-in and the Pi extension without reading cred
   expect(unused.find(c => c.name === "agy")!.level).toBe("skip"); // not needed when no workflow names it
   expect(unused.find(c => c.name === "claude login")!.level).toBe("warn");
   expect(unused.find(c => c.name === "pi ocs extension")!.level).toBe("ok");
+});
+
+test("command is an executor, never a CLI to version or authenticate", async () => {
+  const tmux = fake("tmux", "echo tmux 3.5"), ocs = fake("ocs", "echo ocs 0.8.3");
+  const marker = join(dir, "executed-command");
+  fake("command", `touch '${marker}'; exit 1`);
+  process.env.PATH = `${dir}:/usr/bin:/bin`;
+  const checks = await doctor({ tmux, ocs, agents: ["command"], env: {}, home: dir });
+  expect(checks.map(c => c.name)).toEqual(["tmux", "ocs"]);
+  expect(checks.some(c => c.level === "fail")).toBe(false);
+  expect(existsSync(marker)).toBe(false);
 });

@@ -6,7 +6,7 @@ import { quote } from "./process";
 import type { HostConfig } from "./types";
 
 // Driver and host must agree on this number; it changes with any remote operation's contract.
-export const REMOTE_PROTOCOL = 3;
+export const REMOTE_PROTOCOL = 4;
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
 export const DEFAULTS = { bin: "~/.local/bin/sflow", slots: 2, maxLoad: 0.8, minFreeGB: 5 } as const;
 

@@ -348,7 +348,7 @@ export class HostRouter implements SessionRuntime {
     s.job ??= { id: `${run.id}-${step.id}`, phase: "placing" };
     // A start that was already sent is only ever looked up by its job id, never sent again.
     if (s.job.phase === "starting" && s.host) return this.adopt(run, step, this.link(run, s.host), "a previous start's answer was lost");
-    if (!s.job.commit) {
+    if (step.input !== "none" && !s.job.commit) {
       const source = step.workspace !== undefined ? join(run.dir, workspaceRoot(run.workflow.steps, step), "worktree") : step.cwd;
       const f = await this.freezeLocal(run, source);
       Object.assign(s.job, { commit: f.commit, tree: f.tree, head: f.head, repo: f.repo, source: f.root,
@@ -363,7 +363,7 @@ export class HostRouter implements SessionRuntime {
     for (const name of names) {
       const link = this.link(run, name);
       s.host = name;
-      if (job.phase === "placing" || job.phase === "sending") {
+      if (step.input !== "none" && (job.phase === "placing" || job.phase === "sending")) {
         job.phase = "sending"; saveRun(run);
         try { await this.send(run, link, { root: job.source!, repo: job.repo! } as Frozen, job.commit!, `refs/sflow/jobs/${job.id}`); }
         catch (e) { reasons.push(`${name}: sending code failed: ${(e as Error).message}`); job.phase = "placing"; delete s.host; saveRun(run); continue; }
@@ -371,7 +371,7 @@ export class HostRouter implements SessionRuntime {
       job.phase = "starting"; saveRun(run);
       let state: string;
       try {
-        state = (await link.call<{ state: string }>("job-start", { jobId: job.id, repo: job.repo, commit: job.commit, tree: job.tree, cwd: job.cwd ?? ".",
+        state = (await link.call<{ state: string }>("job-start", { jobId: job.id, ...(step.input === "none" ? { input: "none" } : {}), repo: job.repo, commit: job.commit, tree: job.tree, cwd: job.cwd ?? ".",
           argv: step.command, artifacts: step.artifacts ?? [], slots: name === "local" ? run.workflow.concurrency : run.hosts![name].slots }, 120_000)).state;
       } catch (e) { return this.adopt(run, step, link, (e as Error).message); }
       if (state === "busy") { reasons.push(`${name} has no free slot`); job.phase = "placing"; delete s.host; saveRun(run); continue; }
@@ -386,7 +386,7 @@ export class HostRouter implements SessionRuntime {
   private async adopt(run: Run, step: Step, link: Link, why: string): Promise<Outcome> {
     const s = run.steps[step.id], job = s.job!;
     const st = await link.call<any>("job-status", { jobId: job.id }).catch(() => ({ state: "unknown" }));
-    const ours = st.spec && st.spec.commit === job.commit && st.spec.tree === job.tree && JSON.stringify(st.spec.argv) === JSON.stringify(step.command);
+    const ours = st.spec && (st.spec.input ?? "snapshot") === (step.input ?? "snapshot") && st.spec.commit === job.commit && st.spec.tree === job.tree && JSON.stringify(st.spec.argv) === JSON.stringify(step.command);
     if (["missing", "unknown", "removed"].includes(st.state) || !ours) {
       s.status = "uncertain"; s.uncertainty = "launch";
       s.error = `starting the job on ${link.name} has an unknown outcome (${why}; host says ${st.state}${st.state !== "missing" && !ours ? ", record does not match this step" : ""}); it is never started again automatically`;
@@ -429,7 +429,7 @@ export class HostRouter implements SessionRuntime {
     // Evidence problems block the step whatever the exit code; artifact problems block a success.
     const evidence: string[] = [], problems: string[] = [];
     const spec = st.spec ?? {};
-    if (spec.commit !== job.commit || spec.tree !== job.tree || JSON.stringify(spec.argv) !== JSON.stringify(step.command) ||
+    if ((spec.input ?? "snapshot") !== (step.input ?? "snapshot") || (step.input === "none" && spec.repo !== undefined) || spec.commit !== job.commit || spec.tree !== job.tree || JSON.stringify(spec.argv) !== JSON.stringify(step.command) ||
       JSON.stringify(spec.artifacts) !== JSON.stringify(step.artifacts ?? []) || (spec.cwd ?? ".") !== (job.cwd ?? "."))
       evidence.push(`the host's job record does not match this step's frozen input, command or artifacts`);
     const log = join(dir, "log.txt");
@@ -466,7 +466,7 @@ export class HostRouter implements SessionRuntime {
     const receipt = {
       status, summary: `${argv} on ${s.host}: ${how}${issues.length ? `; ${issues.join(", ")}` : ""}`,
       checks: [`${argv} → ${how}`], artifacts: [log, ...artifacts.map(a => a.path as string)],
-      details: { host: s.host, jobId: job.id, inputCommit: spec.commit ?? null, inputTree: spec.tree ?? null, inputHead: job.head, cwd: spec.cwd ?? ".",
+      details: { host: s.host, jobId: job.id, input: spec.input ?? "snapshot", inputCommit: spec.commit ?? null, inputTree: spec.tree ?? null, inputHead: job.head ?? null, workingDirectory: st.started?.cwd, cwd: spec.cwd ?? ".",
         argvSha256: createHash("sha256").update(JSON.stringify(spec.argv ?? null)).digest("hex"),
         exitCode: exit.code ?? null, signal: exit.signal ?? null, ...(exit.error ? { error: exit.error } : {}),
         arch: st.started?.arch, platform: st.started?.platform, machine: st.started?.host,

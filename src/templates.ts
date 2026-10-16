@@ -78,7 +78,7 @@ export function parseTemplate(value: unknown): Template {
   }
   Object.keys(roles).forEach(k => visit(k));
   if (!Array.isArray(o.steps) || !o.steps.length) throw new Error("template needs steps");
-  const allowed = ["id", "role", "prompt", "cwd", "dependsOn", "policy", "worktree", "workspace", "inPlace", "reuseSession", "when", "expect", "timeoutSeconds", "readyTimeoutSeconds", "reviewFix", "host", "command", "artifacts", "allowFailure"];
+  const allowed = ["id", "role", "prompt", "cwd", "dependsOn", "policy", "worktree", "workspace", "inPlace", "reuseSession", "when", "expect", "timeoutSeconds", "readyTimeoutSeconds", "reviewFix", "host", "command", "artifacts", "allowFailure", "input"];
   for (const value of o.steps) {
     const s = obj(value, "step"); keys(s, allowed, "step"); id(s.id, "step");
     // A command step runs a program, not an agent: it has no role, and its prompt is optional.

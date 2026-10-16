@@ -173,7 +173,9 @@ sflow hosts check                     # sflow 版本、工具、负载、剩余�
   "workspace": "implement", "command": ["bun", "test"], "artifacts": ["coverage/summary.txt"] }
 ```
 
-- `cwd` 是本机路径，必须在一个至少有一次提交的 Git 仓库里；远端不需要有这个路径。`cwd` 是普通目录的 host 步骤或 command 步骤，`validate`、`doctor` 和 `run` 都会直接报错。
+- `cwd` 是本机路径，必须在一个至少有一次提交的 Git 仓库里；远端不需要有这个路径。`cwd` 是普通目录的 host 步骤或 command 步骤，`validate`、`doctor` 和 `run` 都会直接报错；command 显式设 `input: "none"` 时除外。
+- 不依赖代码的环境检查可以用 `{ "id": "env", "agent": "command", "input": "none", "cwd": ".", "host": "box", "command": ["uname", "-a"] }`。`cwd` 仍是本机已有目录，用来归类 run；实际在执行机器的新空目录里运行，结束后清理。不写 `host` 就在本机运行。此模式不复制文件、不支持 `workspace` 和 `artifacts`；结果记录 `input: "none"`，commit/tree/HEAD 为 `null`，另附 argv 摘要、执行机器、退出码和日志证据。空目录不是权限沙箱。使用前一起升级 driver 和主机（远程协议 4）；这类 run 使用记录版本 5。
+- `doctor workflow.json` 在本机或目标主机查找命令文件，不执行命令，也不要求安装或登录“command CLI”。依赖 workspace 的命令和远端快照里的相对路径命令会明确标为等待对应目录生成后检查。
 - 远端拿到的是文件的冻结副本：已跟踪和未跟踪、未被忽略的文件，包括未提交的修改。被忽略的文件不发送；不支持 submodule 和 Git LFS。你仓库的 HEAD、index 和对象库都不会被写入，也不会推到 `origin`。
 - 只有每核负载低于 `--max-load`（默认 0.8）、剩余磁盘高于 `--min-free-gb`（默认 5）时才会用这台机器。`--slots`（默认 2）限制那台机器上同时跑几个步骤，所有往这台机器派任务的人共用。
 - 带 host 的步骤不会退回本机跑。任务开始后主机失联，步骤记为 `uncertain`，不会重跑，也不会换机器。

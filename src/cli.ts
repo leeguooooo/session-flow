@@ -157,8 +157,8 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
     const list = args.slice(1), json = list.includes("--json");
     const files = list.filter(a => a !== "--json");
     if (files.length > 1) throw new Error("doctor [workflow.json] [--json]");
-    const agents = files[0] ? parseWorkflow(JSON.parse(readFileSync(resolve(files[0]), "utf8")), dirname(resolve(files[0]))).steps.map(s => s.agent) : undefined;
-    const checks = await doctor({ tmux: runtime.binary, ocs: transport.binary, agents });
+    const workflow = files[0] ? parseWorkflow(JSON.parse(readFileSync(resolve(files[0]), "utf8")), dirname(resolve(files[0]))) : undefined;
+    const checks = await doctor({ tmux: runtime.binary, ocs: transport.binary, workflow });
     if (json) print(checks); else console.log(renderChecks(checks).join("\n"));
     if (checks.some(c => c.level === "fail")) process.exitCode = 1; return;
   }

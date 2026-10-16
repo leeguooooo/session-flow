@@ -837,3 +837,125 @@ test("a write step prefers a slot whose directory this project already has", asy
   expect(await rt.placeAgent(second, second.workflow.steps[0])).toEqual({ ok: true });
   expect(second.steps.impl.remote!.cwd).toBe(first);
 }, 60_000);
+
+for (const target of ["local", "mini"]) test(`input none on ${target} starts empty, returns honest evidence and cleans its directory`, async () => {
+  const plain = join(base, "plain"); mkdirSync(plain); writeFileSync(join(plain, "private"), "not an input");
+  const run = setup([{ id: "probe", cwd: plain, agent: "command", input: "none", ...(target === "mini" ? { host: "mini" } : {}),
+    command: ["sh", "-c", 'test -z "$(ls -A)" && pwd && touch temporary-output'] }], target === "mini" ? { mini: host("mini") } : {});
+  const rt = router(), tr = new NoTransport();
+  expect(run.version).toBe(5);
+  // No call may freeze the source or ask any host to receive code.
+  (rt as any).freezeLocal = async () => { throw new Error("must not freeze"); };
+  (rt as any).send = async () => { throw new Error("must not transfer"); };
+  await until(run, rt, tr, () => run.status !== "running");
+  expect(run.steps.probe.status).toBe("done");
+  const r = resolveResult(run, "probe", run.steps.probe.result!) as any;
+  expect(r.details).toMatchObject({ input: "none", inputCommit: null, inputTree: null, inputHead: null, exitCode: 0 });
+  expect(r.details.argvSha256).toMatch(/^[a-f0-9]{64}$/);
+  expect(r.details.log.sha256).toMatch(/^[a-f0-9]{64}$/);
+  expect(r.details.workingDirectory).toContain(`/jobs/${run.steps.probe.job!.id}/work`);
+  expect(existsSync(r.details.workingDirectory)).toBe(false);
+  expect(readdirSync(plain)).toEqual(["private"]);
+  expect(existsSync(join(run.dir, "objects"))).toBe(false);
+  if (target === "mini") expect(existsSync(join(base, "host-mini", "state", "repos"))).toBe(false);
+});
+
+test("input none is explicit and cannot borrow a workspace, return artifacts or apply to an agent", () => {
+  const plain = join(base, "plain"); mkdirSync(plain);
+  const wf = (extra: object) => parseWorkflow({ version: 1, name: "t", steps: [{ id: "a", agent: "command", command: ["true"], cwd: plain, ...extra }] }, base);
+  expect(wf({ input: "none" }).steps[0].input).toBe("none");
+  // Context-only cwd can contain the state roots: it is never sent or executed in.
+  expect(wf({ input: "none", cwd: base }).steps[0].cwd).toBe(base);
+  for (const extra of [{}, { input: "snapshot" }]) expect(() => wf(extra)).toThrow("Git checkout");
+  expect(() => wf({ input: "wrong" })).toThrow("input must");
+  expect(() => wf({ input: "none", workspace: "x" })).toThrow("cannot use workspace or artifacts");
+  expect(() => wf({ input: "none", artifacts: [] })).toThrow("cannot use workspace or artifacts");
+  expect(() => wf({ input: "none", agent: "codex", prompt: "x", command: undefined })).toThrow("belong to agent");
+});
+
+test("input none adopts a lost start answer without starting another command", async () => {
+  const run = setup([{ id: "a", agent: "command", input: "none", host: "mini", command: ["sh", "-c", 'echo x >> "$HOME/count"'] }], { mini: host("mini") });
+  const rt = router(), tr = new NoTransport();
+  await tick(run, rt, tr);
+  expect(run.steps.a.status).toBe("running");
+  run.steps.a.status = "launching"; run.steps.a.job!.phase = "starting"; saveRun(run);
+  const recovered = (await import("../src/store")).loadRun(run.id);
+  await until(recovered, router(), tr, () => recovered.status !== "running");
+  expect(recovered.steps.a.status).toBe("done");
+  expect(readFileSync(join(base, "host-mini", "count"), "utf8")).toBe("x\n");
+});
+
+test("input none with an unknown start stays uncertain and is never sent to another host", async () => {
+  const run = setup([{ id: "a", agent: "command", input: "none", host: ["mini", "other"], command: ["true"] }], { mini: host("mini"), other: host("other") });
+  const rt = router(), tr = new NoTransport();
+  let starts = 0;
+  for (const name of ["mini", "other"]) {
+    const link = rt.link(run, name), call = link.call.bind(link);
+    link.call = async (op, input, timeout) => { if (op === "job-start") { starts++; throw new Error("connection lost"); } return call(op, input, timeout); };
+  }
+  await tick(run, rt, tr); await tick(run, rt, tr);
+  expect(run.steps.a.status).toBe("uncertain");
+  expect(starts).toBe(1);
+});
+
+test("input none rejects snapshot receipts and older remote protocols", async () => {
+  const run = setup([{ id: "a", agent: "command", input: "none", host: "mini", command: ["true"] }], { mini: host("mini") });
+  const rt = router(), tr = new NoTransport();
+  const link = rt.link(run, "mini"), call = link.call.bind(link);
+  link.call = async (op, input, timeout) => {
+    const r = await call<any>(op, input, timeout);
+    return op === "job-status" && r.spec ? { ...r, spec: { ...r.spec, input: "snapshot" } } : r;
+  };
+  await until(run, rt, tr, () => run.status !== "running");
+  expect(run.steps.a.status).toBe("blocked");
+  expect(run.steps.a.error).toContain("does not match");
+  const old = setup([{ id: "a", agent: "command", input: "none", host: "mini", command: ["true"] }], { mini: host("mini") });
+  const oldRt = router(), oldLink = oldRt.link(old, "mini"), oldCall = oldLink.call.bind(oldLink);
+  oldLink.call = async (op, input, timeout) => { const r = await oldCall<any>(op, input, timeout); return op === "hello" ? { ...r, protocol: REMOTE_PROTOCOL - 1 } : r; };
+  await tick(old, oldRt, tr);
+  expect(old.steps.a.status).toBe("blocked");
+  expect(old.steps.a.error).toContain("protocol");
+});
+
+test("doctor checks a remote command on its host without executing it or asking for an AI login", async () => {
+  const { doctor } = await import("../src/doctor");
+  const { saveHosts } = await import("../src/hosts");
+  saveHosts({ mini: host("mini") });
+  const tmux = join(base, "tmux-version"), ocs = join(base, "ocs-version");
+  for (const [p, out] of [[tmux, "tmux 3.5"], [ocs, "ocs 0.8.3"]]) { writeFileSync(p, `#!/bin/sh\necho '${out}'\n`); chmodSync(p, 0o700); }
+  const workflow = parseWorkflow({ version: 1, name: "doctor-command", steps: [
+    { id: "probe", agent: "command", host: "mini", cwd: project, command: ["sh", "-c", `touch '${join(base, "should-not-exist")}'`] },
+    { id: "missing", agent: "command", input: "none", cwd: project, command: ["no-such-sflow-command"] }
+  ] }, base);
+  const checks = await doctor({ tmux, ocs, workflow });
+  expect(checks.find(c => c.name === "probe command")).toMatchObject({ level: "ok", detail: expect.stringContaining("found, not executed") });
+  expect(checks.find(c => c.name === "missing command")).toMatchObject({ level: "fail" });
+  expect(checks.some(c => /login|codex|^command$/.test(c.name))).toBe(false);
+  expect(existsSync(join(base, "should-not-exist"))).toBe(false);
+  expect(existsSync(join(base, "host-mini", "state", "jobs"))).toBe(false);
+});
+
+test("input none cancellation closes its process group, cleans work and retains a no-restart tombstone", async () => {
+  const run = setup([{ id: "a", agent: "command", input: "none", host: "mini", command: ["sh", "-c", 'echo x >> "$HOME/count"; sleep 30'] }], { mini: host("mini") });
+  const rt = router(), tr = new NoTransport();
+  await tick(run, rt, tr);
+  const link = rt.link(run, "mini"), jobId = run.steps.a.job!.id;
+  let started = false;
+  const count = join(base, "host-mini", "count");
+  for (let i = 0; i < 100 && !started; i++) {
+    const state = await link.call<any>("job-status", { jobId });
+    // started.json is written after spawn, before the child necessarily executes echo.
+    started = !!state.started && existsSync(count) && readFileSync(count, "utf8") === "x\n";
+    if (!started) await Bun.sleep(30);
+  }
+  expect(started).toBe(true);
+  await rt.cancelCommand(run, run.workflow.steps[0], "manual test cancellation");
+  await until(run, rt, tr, () => run.status !== "running");
+  expect(run.steps.a.status).toBe("failed");
+  expect(existsSync(join(base, "host-mini", "state", "jobs", jobId, "work"))).toBe(false);
+  expect(readdirSync(join(base, "host-mini", "state", "slots"))).toEqual([]);
+  await link.call("gc", { days: 0 });
+  expect((await link.call<any>("job-status", { jobId })).state).toBe("removed");
+  expect((await link.call<any>("job-start", { jobId, input: "none", argv: ["true"], artifacts: [], slots: 2 })).state).toBe("exists");
+  expect(readFileSync(join(base, "host-mini", "count"), "utf8")).toBe("x\n");
+});

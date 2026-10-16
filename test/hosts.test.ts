@@ -636,6 +636,50 @@ test("a retained session that fills the only slot blocks a command step instead 
   expect(run.steps.b.error).toContain("fill concurrency slots");
 });
 
+test("a busy host keeps the run going; the step waits up to its timeout, then is blocked with the reasons", async () => {
+  const run = setup([{ id: "build", agent: "command", host: "mini", command: ["true"], timeoutSeconds: 60 }], { mini: host("mini") });
+  const answers: ({ wait: string } | { ok: true })[] = [{ wait: "mini has no free slot" }, { wait: "mini has no free slot" }, { ok: true }];
+  const rt: SessionRuntime = {
+    async create() {}, async exists() { return false; }, async stop() {},
+    async startCommand(r: Run) { const a = answers.shift()!; if ("ok" in a) Object.assign(r.steps.build, { status: "running" }); return a; },
+    async pollCommand() {},
+  };
+  await tick(run, rt, new NoTransport());
+  // One refusal used to end the whole run as blocked while the step still said pending.
+  expect(run.status).toBe("running");
+  expect(run.steps.build).toMatchObject({ status: "pending", error: "waiting for a host: mini has no free slot" });
+  const since = run.steps.build.hostWaitSince!;
+  await tick(run, rt, new NoTransport());
+  expect(run.steps.build.hostWaitSince).toBe(since);
+  await tick(run, rt, new NoTransport());
+  expect(run.steps.build.status).toBe("running");
+  expect(run.steps.build.hostWaitSince).toBeUndefined();
+  // Waiting longer than the step's timeout ends it, with the last reason.
+  const late = setup([{ id: "build", agent: "command", host: "mini", command: ["true"], timeoutSeconds: 60 }], { mini: host("mini") });
+  const busy: SessionRuntime = { async create() {}, async exists() { return false; }, async stop() {}, async startCommand() { return { wait: "mini is busy (load 9.1 per core)" }; } };
+  await tick(late, busy, new NoTransport());
+  late.steps.build.hostWaitSince = Date.now() - 61_000;
+  await tick(late, busy, new NoTransport());
+  expect(late.steps.build).toMatchObject({ status: "blocked", error: "no host could take this step within 60s: mini is busy (load 9.1 per core)" });
+  expect(late.status).toBe("blocked");
+});
+
+test("an agent step waiting for a host keeps the run going and is placed once a host frees up", async () => {
+  const run = setup([{ id: "r", agent: "codex", prompt: "x", host: "mini" }], { mini: host("mini") });
+  let free = false, placed = 0;
+  const rt: SessionRuntime = {
+    async create() {}, async exists() { return false; }, async stop() {},
+    async placeAgent(r: Run) { if (!free) return { wait: "mini has no free slot" }; placed++; r.steps.r.host = "mini"; r.steps.r.remote = { dir: "/r", cwd: "/r/c" }; return { ok: true as const }; },
+  };
+  await tick(run, rt, new NoTransport());
+  expect(run.status).toBe("running");
+  expect(run.steps.r).toMatchObject({ status: "pending", error: "waiting for a host: mini has no free slot" });
+  free = true;
+  try { await tick(run, rt, new NoTransport()); } catch {}
+  expect(placed).toBe(1);
+  expect(run.steps.r.hostWaitSince).toBeUndefined();
+});
+
 test("the host lock is mutual exclusion across processes and dies with its holder", async () => {
   const home = join(base, "lock"), log = join(base, "lock.log");
   const remote = JSON.stringify(resolve(import.meta.dir, "../src/remote.ts"));

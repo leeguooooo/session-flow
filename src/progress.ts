@@ -33,6 +33,7 @@ export function describe(workflow: Workflow): string[] {
 // completion from a live process. With a terminal on stdin, a typed number answers the prompt shown.
 export class Progress {
   private status = new Map<string, string>();
+  private hostWait = new Map<string, number>();
   private prompts = new Map<string, Menu>();
   // The TUI redraws a moment after a key; until then the answered menu is still on screen.
   private answered = new Map<string, { id: string; at: number }>();
@@ -84,6 +85,12 @@ export class Progress {
           this.emit({ type: "step", step: step.id, agent: step.agent, status: s.status, ...(detail ? { detail } : {}) },
             `${step.id} (${step.agent}): ${s.status}${detail ? ` — ${detail}` : ""}`);
         }
+        // A step waiting for a busy host stays pending, so its status never changes: say why once.
+        if (s.status === "pending" && s.hostWaitSince !== undefined && this.hostWait.get(step.id) !== s.hostWaitSince) {
+          this.hostWait.set(step.id, s.hostWaitSince); this.changedAt = Date.now();
+          this.emit({ type: "step", step: step.id, agent: step.agent, status: "pending", detail: s.error ?? "waiting for a host" },
+            `${step.id} (${step.agent}): ${s.error ?? "waiting for a host"} (up to ${step.timeoutSeconds}s)`);
+        }
         // Trust/login prompts come before acceptance, tool approvals after it.
         if (["starting", "running"].includes(s.status) && this.mode !== "none" && step.agent !== "command") {
           const menu = await this.runtime.waitingOnPrompt(this.run, step.id);
@@ -98,6 +105,9 @@ export class Progress {
         const busy = Object.entries(this.run.steps).filter(([, s]) => ["starting", "running"].includes(s.status))
           .map(([id, s]) => `${id} ${s.status} ${since(Date.now() - (s.startedAt ?? Date.now()))}`);
         if (busy.length) this.write(`  still working: ${busy.join("; ")}. Look at one with: sflow logs ${this.run.id} <step>`);
+        const waiting = Object.entries(this.run.steps).filter(([, s]) => s.status === "pending" && s.hostWaitSince !== undefined)
+          .map(([id, s]) => `${id} ${since(Date.now() - s.hostWaitSince!)}`);
+        if (waiting.length) this.write(`  waiting for a host: ${waiting.join("; ")}. See them with: sflow hosts check`);
       }
     } finally { this.busy = false; }
   }

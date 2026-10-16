@@ -163,6 +163,15 @@ the remote atomically (`mkdir` of `slots/<n>`, shared by every controller using
 that host). A probe or claim refused before anything started is safe to retry on
 another host; after a claim the step belongs to that host.
 
+When no candidate can take the step yet (busy, out of slots, a send that failed
+before anything started) the step stays `pending` with `waiting for a host: <reasons>`
+and records `hostWaitSince`. Such a step can still start, so the run keeps running and
+placement is tried again on later ticks. The wait is bounded by the step's own
+`timeoutSeconds`, counted from the first refusal; past it the step is `blocked` with the
+last reasons. Once a host takes it, `hostWaitSince` is cleared. When every candidate is
+unusable for good (no such tool, wrong protocol, unreachable), the step is blocked at once,
+as before.
+
 ### Code on the remote
 
 Each host keeps one private bare repository per project under its data home.

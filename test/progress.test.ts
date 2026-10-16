@@ -81,6 +81,18 @@ test("json progress emits one event per line", async () => {
   expect(event).toMatchObject({ type: "step", step: "plan", agent: "claude", status: "running", runId: run.id });
 });
 
+test("a step waiting for a host is reported once per wait, though its status stays pending", async () => {
+  const run = setup(), lines: string[] = [];
+  const progress = new Progress(run, fakeRuntime({}, []), "text", l => lines.push(l), false);
+  await progress.poll(); lines.length = 0;
+  Object.assign(run.steps.plan, { hostWaitSince: Date.now(), error: "waiting for a host: mini has no free slot" });
+  await progress.poll(); await progress.poll();
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("plan (claude): waiting for a host: mini has no free slot (up to 1800s)");
+  run.steps.plan.hostWaitSince! += 1; await progress.poll();
+  expect(lines).toHaveLength(2);
+});
+
 test("review separates what a worker claimed from what is left to do", async () => {
   const run = setup();
   run.steps.plan.status = "done"; run.steps.plan.startedAt = Date.now() - 5000; run.steps.plan.finishedAt = Date.now();

@@ -211,6 +211,9 @@ artifacts, no agent involved.
 - A step with a host never falls back to this machine. If the host stops
   answering after the job started, the step becomes `uncertain`; it is never
   started again or moved elsewhere.
+- While every host is busy or full, the step waits (`waiting for a host: …`) and
+  the run keeps going; it is tried again until its `timeoutSeconds` (default 1800)
+  has passed since the first refusal, and then it is blocked with the reasons.
 - Agent steps can have a host too. The native session runs there (its CLI must be
   installed and signed in on that machine, plus tmux and ocs); `status`, `logs`,
   `answer` and `attach` work the same. A write step's changes come back as

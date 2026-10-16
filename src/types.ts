@@ -60,6 +60,8 @@ export interface StepState {
   contextBytes?: number;
   dependencyBytes?: number;
   fullDependencyBytes?: number;
+  // When no host could take the step yet; cleared once one does. Bounded by timeoutSeconds.
+  hostWaitSince?: number;
   // The host this step was placed on (recorded before the host is asked to do anything).
   host?: string;
   // Paths on that host: its run directory, and the working directory of this step.

@@ -10,6 +10,16 @@ import type { Run, SessionRuntime, Step, StepState, Transport, TaskEvent, Messag
 
 const active = new Set(["dispatching", "launching", "starting", "running"]);
 const terminal = new Set(["done", "failed", "blocked", "uncertain", "cancelled", "skipped"]);
+// A step waiting for a busy host can still start: the run keeps going while it waits.
+const waitingForHost = (s: StepState) => s.status === "pending" && s.hostWaitSince !== undefined;
+// No host could take the step yet. It waits at most its own timeout, counted from the first
+// refusal; then it is blocked with the last reasons. Nothing has started, so retrying is safe.
+function hostWait(s: StepState, step: Step, why: string) {
+  s.hostWaitSince ??= Date.now();
+  if (Date.now() - s.hostWaitSince > step.timeoutSeconds * 1000) {
+    s.status = "blocked"; s.error = `no host could take this step within ${step.timeoutSeconds}s: ${why}`; delete s.hostWaitSince;
+  } else { s.status = "pending"; s.error = `waiting for a host: ${why}`; }
+}
 // A skipped step (its when did not hold) counts as finished for whatever comes after it.
 const finished = (status: string) => status === "done" || status === "skipped";
 export function field(value: unknown, path: string): unknown {
@@ -205,8 +215,9 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
       s.status = "launching"; s.startedAt ??= Date.now(); saveRun(run);
       let r: Awaited<ReturnType<NonNullable<SessionRuntime["startCommand"]>>>;
       try { r = await runtime.startCommand(run, step); } catch (e) { r = { error: (e as Error).message }; }
-      if ("wait" in r) { s.status = "pending"; delete s.startedAt; s.error = `waiting for a host: ${r.wait}`; }
-      else if ("error" in r && s.status === "launching") { s.status = "blocked"; s.error = r.error; }
+      if ("wait" in r) { delete s.startedAt; hostWait(s, step, r.wait); }
+      else if ("error" in r && s.status === "launching") { s.status = "blocked"; s.error = r.error; delete s.hostWaitSince; }
+      else delete s.hostWaitSince;
       saveRun(run); continue;
     }
     const group = prefixGroup(step);
@@ -224,7 +235,8 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
       if (!runtime.placeAgent) { s.status = "blocked"; s.error = "this runtime cannot place steps on hosts"; saveRun(run); continue; }
       let r: Awaited<ReturnType<NonNullable<SessionRuntime["placeAgent"]>>>;
       try { r = await runtime.placeAgent(run, step); } catch (e) { r = { error: (e as Error).message }; }
-      if ("wait" in r) { s.error = `waiting for a host: ${r.wait}`; saveRun(run); continue; }
+      if ("wait" in r) { hostWait(s, step, r.wait); saveRun(run); continue; }
+      delete s.hostWaitSince;
       if ("error" in r) { s.status = "blocked"; s.error = r.error; saveRun(run); continue; }
       delete s.error; saveRun(run);
     }
@@ -264,7 +276,7 @@ export async function tick(run: Run, runtime: SessionRuntime, transport: Transpo
     run.status = "done";
     for (const step of run.workflow.steps) { await runtime.stop(run, step.id); run.steps[step.id].lifecycle = "closed"; }
     await runtime.finish?.(run);
-  } else if (!Object.values(run.steps).some(s => active.has(s.status))) run.status = "blocked";
+  } else if (!Object.values(run.steps).some(s => active.has(s.status) || waitingForHost(s))) run.status = "blocked";
   saveRun(run);
 }
 export async function drive(run: Run, runtime: SessionRuntime, transport: Transport, intervalMs = 1000) {

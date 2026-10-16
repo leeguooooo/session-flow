@@ -182,3 +182,14 @@ test("templates carry command steps and hosts; --host overrides a step's host", 
   expect(() => prepareStart({ cwd, task: "x", template: "simple", hosts: { nope: ["mini"] } })).toThrow("unknown step nope");
   expect(() => parseTemplate({ ...template(), steps: [{ id: "c", role: "fix", cwd: ".", command: ["true"] }] })).toThrow("no role");
 });
+
+test("templates preserve explicit command input mode in the frozen workflow", () => {
+  const { cwd } = fixture(), t = template() as any;
+  t.steps.push({ id: "probe", command: ["uname", "-a"], input: "none", cwd: ".", dependsOn: ["look"] });
+  saved(cwd, t);
+  const plan = prepareStart({ cwd, task: "inspect", template: "simple" });
+  expect(plan.workflow.steps[1]).toMatchObject({ agent: "command", input: "none" });
+  const run = createRun(plan.workflow, plan.origin); dirs.push(join(run.socket, ".."));
+  expect(run.version).toBe(5);
+  expect(loadRun(run.id).workflow.steps[1].input).toBe("none");
+});

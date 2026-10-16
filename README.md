@@ -200,7 +200,19 @@ artifacts, no agent involved.
 
 - `cwd` is a path on this machine, inside a Git checkout with at least one
   commit; the host never needs that path. `validate`, `doctor` and `run` reject a
-  host or command step whose `cwd` is a plain directory.
+  host or command step whose `cwd` is a plain directory, unless the command explicitly uses `input: "none"`.
+- For environment checks without a repository, set `"input": "none"` on a command
+  step, for example `{ "id": "env", "agent": "command", "input": "none", "cwd": ".", "host": "box", "command": ["uname", "-a"] }`.
+  `cwd` remains an existing local directory for run discovery; execution uses a new
+  empty directory on the target machine, removed after exit. Omit `host` for local
+  execution. No files are copied, `workspace` and `artifacts` are unavailable,
+  and the receipt records `input: "none"` with null commit/tree/HEAD plus the argv,
+  machine, exit and log evidence. This directory does not sandbox the command.
+  Upgrade driver and hosts together (remote protocol 4); these runs use record version 5.
+- `doctor workflow.json` locates command executables locally or on their target
+  hosts without executing them, and does not ask for a “command CLI” or AI login.
+  Commands using a dependency workspace or a relative remote snapshot path are
+  marked as deferred until that workspace/snapshot exists.
 - The host gets a frozen copy of the files: tracked and untracked, non-ignored
   ones, including uncommitted edits. Ignored files are not sent;
   submodules and Git LFS are not supported. Your repository's HEAD, index and object store

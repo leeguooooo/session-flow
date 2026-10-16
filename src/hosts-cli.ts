@@ -22,7 +22,7 @@ export async function hostPreflight(workflow: Workflow, hosts?: Record<string, H
   for (const [n, c] of Object.entries(hosts)) seen[n] = await hello(n, c);
   const problems: string[] = [];
   for (const s of workflow.steps.filter(s => s.host)) {
-    const needs = ["git", ...(s.agent === "command" ? [] : ["tmux", "ocs", s.agent])];
+    const needs = [...(s.input === "none" ? [] : ["git"]), ...(s.agent === "command" ? [] : ["tmux", "ocs", s.agent])];
     const why: string[] = [];
     const ok = candidates(s.host!, hosts).filter(n => {
       const h = seen[n];

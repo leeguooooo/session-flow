@@ -21,7 +21,7 @@ export function createRun(workflow: Workflow, origin?: RunOrigin, hosts?: Record
   const socketDir = join(process.env.TMPDIR ?? "/tmp", `sf-${id.slice(0, 12)}`);
   mkdirSync(socketDir, { mode: 0o700 });
   const remote = workflow.steps.some(s => s.host || s.agent === "command");
-  const run: Run = { version: remote ? 4 : workflow.steps.some(s => s.inPlace || s.reuseSession) ? 3 : 2, id, ...(remote ? { hosts: hosts ?? {} } : {}), dir, socket: join(socketDir, "tmux.sock"), channel: `sflow-${id}`,
+  const run: Run = { version: workflow.steps.some(s => s.input === "none") ? 5 : remote ? 4 : workflow.steps.some(s => s.inPlace || s.reuseSession) ? 3 : 2, id, ...(remote ? { hosts: hosts ?? {} } : {}), dir, socket: join(socketDir, "tmux.sock"), channel: `sflow-${id}`,
     workflow, ...(origin ? { origin } : {}), createdAt: Date.now(), status: "running", steps: Object.fromEntries(workflow.steps.map(s => [s.id,
       { status: "pending", token: randomBytes(24).toString("hex"), session: `sf-${sessionRoot(workflow.steps, s)}` }])) };
   saveRun(run); return run;
@@ -31,7 +31,7 @@ export function loadRun(id: string): Run {
   if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error("invalid run id");
   const dir = join(dataHome(), "runs", id);
   const run = JSON.parse(readFileSync(join(dir, "run.json"), "utf8")) as Run;
-  if (![1, 2, 3, 4].includes(run.version) || run.id !== id || run.dir !== dir) throw new Error("invalid run record");
+  if (![1, 2, 3, 4, 5].includes(run.version) || run.id !== id || run.dir !== dir) throw new Error("invalid run record");
   if (basename(run.socket) !== "tmux.sock" || basename(dirname(run.socket)) !== `sf-${id.slice(0, 12)}`) throw new Error("invalid owned runtime socket path");
   if (existsSync(dirname(run.socket))) {
     const owner = lstatSync(dirname(run.socket));

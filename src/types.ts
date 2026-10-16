@@ -1,7 +1,7 @@
 export type Agent = "claude" | "codex" | "pi" | "agy";
 export const AGENTS: readonly Agent[] = ["claude", "codex", "pi", "agy"];
 export type Policy = "read-only" | "workspace-write";
-// "command" runs a frozen argv (a build or test) instead of a native agent session.
+// "command" runs a frozen argv instead of a native agent session.
 export type Runner = Agent | "command";
 export interface Step {
   id: string;
@@ -24,6 +24,8 @@ export interface Step {
   expect?: Record<string, Scalar>;
   // Hosts (names from hosts.json, or "any") the step may run on; absent means this machine.
   host?: string[];
+  // Commands default to a Git snapshot; none runs in an empty temporary directory.
+  input?: "snapshot" | "none";
   command?: string[];
   artifacts?: string[];
   // A command whose failure is information for the next step (a test before review), not a stop.
@@ -88,7 +90,7 @@ export interface RunOrigin {
   params: Record<string, Scalar>; roles: Record<string, { agent: Agent; model?: string; instructions?: string; sources: Record<string, string> }>;
 }
 export interface Run {
-  version: 1 | 2 | 3 | 4;
+  version: 1 | 2 | 3 | 4 | 5;
   origin?: RunOrigin;
   id: string;
   channel: string;

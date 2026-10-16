@@ -244,6 +244,36 @@ job's process group; when the host cannot be reached the cancellation is
 recorded as unknown, never as done. Without `host`, a command step runs the same
 journal on the local machine.
 
+### Commands without a Git input (#19)
+
+A command step may explicitly set `input: "none"`. The default remains `snapshot`:
+all existing Git validation, freezing, transfers and artifact semantics stay in place.
+With `none`, `cwd` still names an existing local directory for workflow context and
+run discovery; it need not be in Git, is never copied, and is not the execution
+working directory. On the selected machine the journal runner creates a private,
+empty `jobs/<jobId>/work`, runs the frozen argv there and removes it after exit.
+`workspace` and `artifacts` are rejected in this mode. Agent steps cannot use it.
+
+The result states `input: "none"`, null commit/tree/HEAD, the actual working
+directory, argv hash, host/platform/architecture, timestamps, exit and log hash.
+It makes no claim about a code snapshot or the reproducibility of external system
+state. An empty cwd is not a sandbox: the command keeps the invoking user's OS
+permissions. Slots, process-group cancellation, job-id tombstones and never-resend
+recovery apply unchanged. Adoption and collection verify the input mode as well
+as the existing command evidence; an uncertain launch is not retried.
+
+Runs containing this mode use record version 5 so older drivers refuse them.
+Remote protocol 4 adds the mode and a read-only `command-check` operation that
+locates a program without executing it. Upgrade both driver and hosts together.
+The new driver still reads run versions 1 through 4 and snapshot job records
+without an explicit input mode.
+
+`doctor <workflow>` checks only local native agents for local CLI/login state.
+Remote agent tools and protocol are checked on their hosts. Command steps never
+request an AI CLI or login: doctor locates their program on the executing machine
+without running it. Workspace commands and relative remote snapshot executables
+are explicitly deferred until that snapshot/worktree exists.
+
 ### Agent steps on a host
 
 The driver stays the only writer of the run record. Before dispatch it sends the

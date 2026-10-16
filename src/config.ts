@@ -42,13 +42,15 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
     const isCommand = s.agent === "command";
     if (!AGENTS.includes(s.agent as Agent) && !isCommand) throw new Error(`${s.id}: agent must be one of ${AGENTS.join(", ")}, or command`);
     if (isCommand) {
+      if (s.input !== undefined && s.input !== "snapshot" && s.input !== "none") throw new Error(`${s.id}: input must be snapshot or none`);
+      if (s.input === "none" && (s.workspace !== undefined || s.artifacts !== undefined)) throw new Error(`${s.id}: input: none cannot use workspace or artifacts`);
       if (!Array.isArray(s.command) || !s.command.length || s.command.length > 256 || s.command.some(a => typeof a !== "string" || !a || Buffer.byteLength(a) > 8192))
         throw new Error(`${s.id}: a command step needs command: ["program", "arg", …]`);
       for (const k of ["model", "worktree", "inPlace", "reuseSession"]) if (s[k] !== undefined) throw new Error(`${s.id}: ${k} does not apply to a command step`);
       if (s.allowFailure !== undefined && typeof s.allowFailure !== "boolean") throw new Error(`${s.id}: allowFailure must be boolean`);
-      if (s.policy !== undefined && s.policy !== "read-only") throw new Error(`${s.id}: a command step reads a frozen copy; it cannot write the project`);
+      if (s.policy !== undefined && s.policy !== "read-only") throw new Error(`${s.id}: a command step runs in an owned directory; workspace-write policy does not apply`);
       s.prompt ??= `run ${(s.command as string[]).join(" ")}`;
-    } else if (s.command !== undefined || s.artifacts !== undefined || s.allowFailure !== undefined) throw new Error(`${s.id}: command, artifacts and allowFailure belong to agent: "command" steps`);
+    } else if (s.command !== undefined || s.artifacts !== undefined || s.allowFailure !== undefined || s.input !== undefined) throw new Error(`${s.id}: command, input, artifacts and allowFailure belong to agent: "command" steps`);
     if (s.artifacts !== undefined && (!Array.isArray(s.artifacts) || s.artifacts.length > 64 ||
       s.artifacts.some(a => typeof a !== "string" || !a || isAbsolute(a) || a.split("/").includes("..") || a.includes("\0"))))
       throw new Error(`${s.id}: artifacts are paths inside the checkout`);
@@ -72,7 +74,7 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
       const git = spawnSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
       if (git.status !== 0 || realpathSync(git.stdout.trim()) !== realpathSync(cwd)) throw new Error(`${s.id}: inPlace cwd must be the Git checkout root`);
     }
-    if (host || isCommand) {
+    if ((host || isCommand) && s.input !== "none") {
       // cwd is a path on this machine; hosts and command jobs get a frozen copy of its Git checkout,
       // so a plain directory is a configuration error, not something a host can fix.
       const git = spawnSync("git", ["-C", cwd, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"], { encoding: "utf8" });
@@ -91,7 +93,7 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
     if (when && !Object.keys(when).length) throw new Error(`${s.id}: when needs at least one dependency`);
     const expect = s.expect === undefined ? undefined : fields(s.expect, `${s.id}: expect`);
     if (policy === "read-only" && s.worktree) throw new Error(`${s.id}: worktree is only for write steps`);
-    if (policy === "read-only" || s.inPlace) {
+    if ((policy === "read-only" || s.inPlace) && s.input !== "none") {
       const project = realpathSync(cwd);
       for (const path of [process.env.SFLOW_HOME ?? resolve(homedir(), ".local/state/session-flow"), process.env.OCS_HOME ?? resolve(homedir(), ".ocs")]) {
         const root = physical(path);
@@ -99,6 +101,7 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
       }
     }
     return { id: s.id, agent: isCommand ? "command" : s.agent as Agent, ...(isCommand ? { command: s.command as string[] } : {}),
+      ...(s.input !== undefined ? { input: s.input as "snapshot" | "none" } : {}),
       ...(s.artifacts ? { artifacts: s.artifacts as string[] } : {}), ...(s.allowFailure ? { allowFailure: true } : {}), ...(host ? { host: [...new Set(host as string[])].sort() } : {}), model: s.model as string | undefined, prompt: s.prompt, cwd,
       dependsOn: deps as string[], policy, worktree: s.worktree as boolean | undefined,
       ...(s.inPlace ? { inPlace: true } : {}), ...(s.reuseSession !== undefined ? { reuseSession: s.reuseSession as string } : {}),
@@ -158,7 +161,7 @@ export function parseWorkflow(value: unknown, base: string): Workflow {
       return realpathSync(root.inPlace ? root.cwd : s.cwd);
     };
     const pa = path(a), pb = path(b);
-    if (inPlace && (pa === pb || pa.startsWith(pb + "/") || pb.startsWith(pa + "/")) &&
+    if (a.input !== "none" && b.input !== "none" && inPlace && (pa === pb || pa.startsWith(pb + "/") || pb.startsWith(pa + "/")) &&
         [a, b].some(s => s.policy === "workspace-write") && !ancestors(a.id).has(b.id) && !ancestors(b.id).has(a.id))
       throw new Error(`${a.id} and ${b.id}: in-place readers/writers must be dependency ordered`);
     if (sessionRoot(steps, a) === sessionRoot(steps, b) && !ancestors(a.id).has(b.id) && !ancestors(b.id).has(a.id))

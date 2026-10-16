@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { parseWorkflow } from "../src/config";
+import { tmuxWorks } from "./tmux";
 import { createRun, saveRun } from "../src/store";
 import { tick, reconcile } from "../src/engine";
 import { HostRouter } from "../src/hostrun";
@@ -424,14 +425,6 @@ test("gc keeps fresh mirrors and old runs driven on this host", async () => {
   expect(readdirSync(join(process.env.SFLOW_HOME, "slots"))).toHaveLength(2);
 });
 
-// Needs a tmux that can start a server here; CI runners and agent sandboxes may not allow one.
-const tmuxWorks = (() => {
-  if (!Bun.which("tmux")) return false;
-  const sock = join(tmpdir(), `sf-probe-${process.pid}.sock`);
-  const ok = spawnSync("tmux", ["-S", sock, "new-session", "-d", "-s", "p", "sleep", "1"]).status === 0;
-  spawnSync("tmux", ["-S", sock, "kill-server"]); rmSync(sock, { force: true });
-  return ok;
-})();
 test.skipIf(!tmuxWorks)("gc keeps an old mirror with a real live tmux worker", async () => {
   process.env.SFLOW_HOME = join(base, "solo");
   const run = gcRun("00000000-0000-0000-0000-000000000004");

@@ -87,7 +87,7 @@ Otherwise write the JSON from the user's description:
 - `name` and step `id`: lowercase letters, digits and `-`, starting with a letter.
 - `agent`: `claude`, `codex`, `pi` or `agy`. `model` is optional (the CLI's default otherwise).
 - `cwd` is required; relative paths resolve from the workflow file.
-- For command-only environment checks without Git, explicitly use `"input": "none"`. `cwd` remains local workflow context, but the command runs in a new empty private directory on its selected machine (omit host for local), which is removed after exit. No files are copied; `workspace` and `artifacts` are forbidden. Results record null input commit/tree/HEAD, plus argv, machine, exit and log evidence. This is not a sandbox. Driver and hosts must both use remote protocol 4; these runs use record version 5. Default commands still use Git snapshots.
+- For command-only environment checks without Git, explicitly use `"input": "none"`. `cwd` remains local workflow context, but the command runs in a new empty private directory on its selected machine (omit host for local), which is removed after exit. No files are copied; `workspace` and `artifacts` are forbidden. Results record null input commit/tree/HEAD, plus argv, machine, exit and log evidence. This is not a sandbox. The wire protocol remains 3; old hosts keep snapshot support, and input-none capability is checked before dispatch. These runs use record version 5. Default commands still use Git snapshots.
 - `doctor workflow.json` checks command executables without running them or requesting an AI login. Dependency workspace commands and relative remote snapshot paths are explicitly deferred until their input directory exists.
 - `dependsOn` forms a DAG; ready steps run in parallel up to `concurrency` (default 2).
 - `policy` defaults to `read-only`. Writing defaults to `"policy": "workspace-write"` plus `"worktree": true` in a Git repo with at least one commit, or `"workspace": "<step>"` to continue in an earlier write step's worktree (it must be a dependency). Worktrees are never committed or merged for you.
@@ -209,3 +209,17 @@ Every round still fetches its own wrapper task and reports once. Retained TUIs
 occupy concurrency slots (at least 2 when another reviewer must run). Never resend
 an uncertain continuation or recreate a missing retained TUI. Lifecycle and round
 completion are separate fields in status.
+
+### Align driver and hosts
+
+Use `sflow upgrade --hosts --check` (or `--json`) to inspect versions and blockers,
+then `sflow upgrade --hosts` within explicit upgrade authorization. The new local
+binary upgrades configured hosts to its exact release. To select hosts or repair
+partial alignment, use `sflow hosts upgrade <names...> --check`, then the same
+command without `--check`. Do not auto-stop busy/uncertain runs or team members.
+Do not dispatch work concurrently with alignment. Failed local verification leaves
+hosts untouched; remote install uncertainty is reported per host, never retried
+automatically. Recheck actual versions before an explicit retry. Protocol-3 hosts
+can keep running existing snapshot tasks; missing new capabilities block only
+those new operations and name the upgrade command. Older CLIs need one ordinary
+`sflow upgrade` first to obtain the coordinated flags.

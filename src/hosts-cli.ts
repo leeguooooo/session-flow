@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { candidates, hostsFile, loadHosts, parseHost, saveHosts, sshBinary, sshOptions, SshLink, unfit, REMOTE_PROTOCOL, DEFAULTS, type Hello } from "./hosts";
+import { upgradeHosts, hostUpdateFailed, renderHostUpdates } from "./host-upgrade";
+import pkg from "../package.json";
 import type { HostRouter } from "./hostrun";
 import type { HostConfig, Workflow } from "./types";
 
@@ -28,6 +30,7 @@ export async function hostPreflight(workflow: Workflow, hosts?: Record<string, H
       const h = seen[n];
       if (!h.hello) { why.push(h.error!); return false; }
       if (h.hello.protocol !== REMOTE_PROTOCOL) { why.push(unfit(n, hosts[n], h.hello)!); return false; }
+      if (s.input === "none" && !h.hello.capabilities?.includes("command-input-none")) { why.push(`${n} does not support input: none; run sflow hosts upgrade ${n}`); return false; }
       const missing = needs.filter(t => !h.hello!.tools[t]);
       if (missing.length) { why.push(`${n} lacks ${missing.join(", ")}`); return false; }
       return true;
@@ -51,6 +54,7 @@ const USAGE = `sflow hosts list [--json]
 sflow hosts add <name> --ssh <user@host|ssh alias> [--bin path] [--slots n] [--max-load per-core] [--min-free-gb n] [--site s] [--tag t]...
 sflow hosts remove <name>
 sflow hosts check [name...] [--json]      reach each host over ssh: sflow version, tools, load, disk, slots
+sflow hosts upgrade [name...] [--check] [--json]   align hosts to this driver version; skip busy hosts
 sflow hosts install <name> [--from <sflow binary>]   install sflow there (the release installer, or copy a binary)
 sflow hosts gc [name...] [--days n]       delete finished jobs and inactive mirror runs older than n days (default 7) on those hosts
 
@@ -67,6 +71,14 @@ export async function hostsCommand(args: string[], _router: HostRouter): Promise
   const [sub, ...rest] = args;
   const json = rest.includes("--json"), list = rest.filter(a => a !== "--json");
   if (!sub || sub === "help" || sub === "--help") { console.log(USAGE); return 0; }
+  if (sub === "upgrade") {
+    const check = list.includes("--check"), names = list.filter(a => a !== "--check");
+    if (names.some(n => n.startsWith("-"))) throw new Error("hosts upgrade [name...] [--check] [--json]");
+    const rows = await upgradeHosts(pkg.version, names, !check);
+    if (json) console.log(JSON.stringify({ target: pkg.version, check, hosts: rows }, null, 2));
+    else console.log(renderHostUpdates(rows).join("\n"));
+    return hostUpdateFailed(rows) ? 2 : 0;
+  }
   if (sub === "list") {
     const hosts = loadHosts();
     if (json) console.log(JSON.stringify({ file: hostsFile(), hosts }, null, 2));

@@ -89,7 +89,7 @@ export async function doctor(opts: { tmux: string; ocs: string; agents?: string[
       } else if (!isAbsolute(program) && program.includes("/")) {
         checks.push({ name, level: step.input === "none" ? "fail" : "skip", detail: `${program}: ${step.input === "none" ? "an empty working directory has no relative executable" : "checked in the transferred snapshot when the job starts"}` });
       } else {
-        const found: string[] = [], errors: string[] = [];
+        const found: string[] = [], errors: string[] = [], deferred: string[] = [];
         for (const host of candidates(step.host, hosts)) {
           try {
             const link = new SshLink(host, hosts[host]);
@@ -97,11 +97,14 @@ export async function doctor(opts: { tmux: string; ocs: string; agents?: string[
             if (hello.protocol !== REMOTE_PROTOCOL || (step.input !== "none" && !hello.tools.git)) {
               errors.push(`${host}: incompatible protocol or missing Git`); continue;
             }
+            if (!hello.capabilities?.includes("command-check")) {
+              deferred.push(`${host}: lookup needs a newer host; run sflow hosts upgrade ${host}; existing snapshot execution is supported`); continue;
+            }
             const r = await link.call<{ path: string | null }>("command-check", { program }, 20_000);
             if (r.path) found.push(`${host}: ${r.path}`); else errors.push(`${host}: ${program} not found`);
           } catch (e) { errors.push(`${host}: ${(e as Error).message}`); }
         }
-        checks.push({ name, level: found.length ? "ok" : "fail", detail: found.length ? `${found.join("; ")} (found, not executed)` : errors.join("; ") });
+        checks.push({ name, level: found.length ? "ok" : deferred.length ? "skip" : "fail", detail: found.length ? `${found.join("; ")} (found, not executed)` : [...deferred, ...errors].join("; ") });
       }
     }
   }

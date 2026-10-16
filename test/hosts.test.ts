@@ -959,3 +959,56 @@ test("input none cancellation closes its process group, cleans work and retains 
   expect((await link.call<any>("job-start", { jobId, input: "none", argv: ["true"], artifacts: [], slots: 2 })).state).toBe("exists");
   expect(readFileSync(join(base, "host-mini", "count"), "utf8")).toBe("x\n");
 });
+
+test("protocol-3 hosts without new capabilities keep snapshot commands, but refuse input none before dispatch", async () => {
+  const run = setup([{ id: "a", agent: "command", host: "mini", command: ["true"] }], { mini: host("mini") });
+  const rt = router(), tr = new NoTransport(), link = rt.link(run, "mini"), call = link.call.bind(link);
+  link.call = async (op, input, timeout) => {
+    const r = await call<any>(op, input, timeout);
+    if (op === "hello") delete r.capabilities;
+    return r;
+  };
+  await until(run, rt, tr, () => run.status !== "running");
+  expect(run.steps.a.status).toBe("done");
+  const none = setup([{ id: "a", agent: "command", input: "none", host: "mini", command: ["true"] }], { mini: host("mini") });
+  const nr = router(), nl = nr.link(none, "mini"), nc = nl.call.bind(nl);
+  let starts = 0;
+  nl.call = async (op, input, timeout) => { if (op === "job-start") starts++; const r = await nc<any>(op, input, timeout); if (op === "hello") delete r.capabilities; return r; };
+  await tick(none, nr, tr);
+  expect(none.steps.a.status).toBe("blocked");
+  expect(none.steps.a.error).toContain("sflow hosts upgrade mini");
+  expect(starts).toBe(0);
+});
+
+test("a record-5 workflow sends only a record-4 native-agent mirror to a legacy host", async () => {
+  const run = setup([{ id: "env", agent: "command", input: "none", command: ["true"] },
+    { id: "look", agent: "codex", host: "mini", prompt: "inspect" }], { mini: host("mini") });
+  expect(run.version).toBe(5);
+  const rt = router(), link = rt.link(run, "mini"), call = link.call.bind(link);
+  let mirrorVersion: number | undefined;
+  link.call = async (op, input: any, timeout) => {
+    if (op === "prepare") { mirrorVersion = input.run.version; if (mirrorVersion !== 4) throw new Error("legacy host rejects record 5"); }
+    const r = await call<any>(op, input, timeout); if (op === "hello") delete r.capabilities; return r;
+  };
+  expect(await rt.placeAgent(run, run.workflow.steps[1])).toEqual({ ok: true });
+  expect(mirrorVersion).toBe(4);
+});
+
+test("doctor defers command lookup on an older protocol-3 host instead of rejecting its executable", async () => {
+  const { doctor } = await import("../src/doctor"), { saveHosts } = await import("../src/hosts");
+  saveHosts({ mini: host("mini") });
+  const tmux = join(base, "tmux-version"), ocs = join(base, "ocs-version");
+  for (const [p, out] of [[tmux, "tmux 3.5"], [ocs, "ocs 0.8.3"]]) { writeFileSync(p, `#!/bin/sh\necho '${out}'\n`); chmodSync(p, 0o700); }
+  const workflow = parseWorkflow({ version: 1, name: "old-host", steps: [{ id: "probe", agent: "command", host: "mini", cwd: project, command: ["sh", "-c", "true"] }] }, base);
+  const original = SshLink.prototype.call; let lookups = 0;
+  SshLink.prototype.call = async function(op, input, timeout) {
+    if (op === "command-check") { lookups++; throw new Error("old host has no such operation"); }
+    const r: any = await original.call(this, op, input, timeout); if (op === "hello") delete r.capabilities; return r;
+  };
+  try {
+    const checks = await doctor({ tmux, ocs, workflow });
+    expect(checks.some(c => c.level === "fail")).toBe(false);
+    expect(checks.find(c => c.name === "probe command")).toMatchObject({ level: "skip", detail: expect.stringContaining("sflow hosts upgrade mini") });
+    expect(lookups).toBe(0);
+  } finally { SshLink.prototype.call = original; }
+});

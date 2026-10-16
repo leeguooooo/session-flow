@@ -58,6 +58,9 @@ export class HostRouter implements SessionRuntime {
     let hard = 0;
     for (const name of names) {
       const p = await this.probe(run, name);
+      if (p.hello && step.input === "none" && !p.hello.capabilities?.includes("command-input-none")) {
+        reasons.push(`${name} does not support input: none; run sflow hosts upgrade ${name}`); hard++; continue;
+      }
       if (p.hello && need && !p.hello.tools[need]) { reasons.push(`${name} has no ${need}`); hard++; continue; }
       if (p.error || !p.hello) { reasons.push(p.error ?? `${name}: no answer`); if (!p.hello || p.error?.includes("protocol")) hard++; continue; }
       fit.push({ name, hello: p.hello });
@@ -122,7 +125,9 @@ export class HostRouter implements SessionRuntime {
       const writeRoot = x.policy === "workspace-write" && x.workspace === undefined;
       return writeRoot ? { ...rest, worktree: undefined, inPlace: true } : rest;
     });
-    return { version: run.version, id: run.id, channel: run.channel, createdAt: run.createdAt, status: "running",
+    // Mirrors contain native-agent steps only, so they need none of record 5's
+    // input-none command semantics. Keep protocol-3 hosts able to load them.
+    return { version: run.version === 5 ? 4 : run.version, id: run.id, channel: run.channel, createdAt: run.createdAt, status: "running",
       workflow: { ...run.workflow, steps },
       steps: Object.fromEntries([...ids].map(id => [id, { status: "starting", token: run.steps[id].token, session: run.steps[id].session,
         ...(run.steps[id].actor ? { actor: run.steps[id].actor } : {}) }])) };

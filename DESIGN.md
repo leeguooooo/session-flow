@@ -263,10 +263,14 @@ recovery apply unchanged. Adoption and collection verify the input mode as well
 as the existing command evidence; an uncertain launch is not retried.
 
 Runs containing this mode use record version 5 so older drivers refuse them.
-Remote protocol 4 adds the mode and a read-only `command-check` operation that
-locates a program without executing it. Upgrade both driver and hosts together.
-The new driver still reads run versions 1 through 4 and snapshot job records
-without an explicit input mode.
+The wire protocol stays at 3: the additive `command-input-none` and `command-check`
+capabilities in hello gate the new operations. An older protocol-3 host can still
+run snapshot commands and native agents. Missing input-none capability blocks
+before job-start with a host-upgrade command; doctor defers executable lookup on
+hosts without command-check instead of mistaking it for a missing AI CLI.
+Native-agent mirrors contain no input-none command and retain record version 4,
+including in a mixed version-5 driver run. The new driver still reads run versions
+1 through 4 and snapshot job records without an explicit input mode.
 
 `doctor <workflow>` checks only local native agents for local CLI/login state.
 Remote agent tools and protocol are checked on their hosts. Command steps never
@@ -360,3 +364,33 @@ Team members are not counted against any run's `concurrency`, and there is no ma
 count on this machine. Teams run on this machine only. Running members on hosts needs slot
 accounting and SSH-loss handling there, and is not offered yet. agy is excluded: it has no
 per-session identity, so two agy members could not be told apart.
+
+## Coordinated upgrades
+
+`sflow upgrade --hosts --check` plans a local and configured-host upgrade without
+installing anything; `--json` provides the same plan as JSON. `sflow upgrade --hosts`
+updates and verifies the local binary first, then hands host alignment to that NEW
+executable. A failed local install never starts host updates. `sflow hosts upgrade
+[name...] [--check] [--json]` targets the current driver's exact version, not latest.
+
+Before replacement, local unresolved run/team records block the local upgrade.
+For each host the updater reads hello, the complete run inventory and (on 0.7+)
+team members. Occupied slots, unresolved runs, live drivers, open members or
+unreadable inventories skip that host. Activity is rechecked before applying.
+No update stops a worker, answers a prompt, retries a lost installer receipt or
+automatically downgrades/rolls back. Hosts are independent: partial success returns
+nonzero and lists current/available/busy/updated/failed/uncertain per host.
+This is not a distributed transaction or a scheduling lock; another controller
+can start work after the last check. Backwards-compatible protocol 3 and atomic
+binary replacement keep existing executables intact; do not concurrently dispatch
+new work while aligning hosts.
+
+The installer accepts a validated SFLOW_VERSION, verifies the release SHA-256 and
+the staged binary's version, then renames a staged executable on the destination
+filesystem. It never truncates the active executable. Remote installers and binaries
+are pinned to the same release tag, support the configured absolute or ~/.../sflow
+path, and refresh installer-managed skill copies. Afterwards hello must report the
+exact target version, expected protocol and new command capability before success.
+An SSH failure after installation begins is uncertain, with a readback command and
+no automatic retry. A subsequent explicit invocation reconciles an already updated
+host before deciding whether it needs installation.

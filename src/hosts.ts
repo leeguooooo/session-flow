@@ -5,8 +5,8 @@ import { configHome, writeJSON } from "./templates";
 import { quote } from "./process";
 import type { HostConfig } from "./types";
 
-// Driver and host must agree on this number; it changes with any remote operation's contract.
-export const REMOTE_PROTOCOL = 4;
+// Incompatible wire changes bump this number; additive operations use hello capabilities.
+export const REMOTE_PROTOCOL = 3;
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
 export const DEFAULTS = { bin: "~/.local/bin/sflow", slots: 2, maxLoad: 0.8, minFreeGB: 5 } as const;
 
@@ -50,6 +50,7 @@ export function candidates(spec: string[], hosts: Record<string, HostConfig>): s
 export interface Hello {
   protocol: number; version: string; home: string; arch: string; platform: string;
   cpus: number; load: number; freeGB: number; tools: Record<string, string | null>;
+  capabilities?: string[];
   slots: { owner: string; since?: number }[];
 }
 export interface Link {
@@ -138,7 +139,7 @@ export class LocalLink extends ProcessLink {
 
 // Probes a host, answering why it cannot take work now (or null when it can).
 export function unfit(name: string, config: HostConfig, hello: Hello): string | null {
-  if (hello.protocol !== REMOTE_PROTOCOL) return `${name} runs sflow ${hello.version} (remote protocol ${hello.protocol}, this driver needs ${REMOTE_PROTOCOL}); install the same sflow there`;
+  if (hello.protocol !== REMOTE_PROTOCOL) return `${name} runs sflow ${hello.version} (remote protocol ${hello.protocol}, this driver needs ${REMOTE_PROTOCOL}); check/update it with: sflow hosts upgrade ${name} --check`;
   const perCore = hello.load / Math.max(1, hello.cpus);
   if (perCore > config.maxLoad) return `${name} is busy (load ${hello.load.toFixed(1)} on ${hello.cpus} cores, limit ${config.maxLoad} per core)`;
   if (hello.freeGB < config.minFreeGB) return `${name} has ${hello.freeGB.toFixed(1)} GB free, under its minFreeGB ${config.minFreeGB}`;

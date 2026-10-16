@@ -174,7 +174,7 @@ sflow hosts check                     # sflow 版本、工具、负载、剩余�
 ```
 
 - `cwd` 是本机路径，必须在一个至少有一次提交的 Git 仓库里；远端不需要有这个路径。`cwd` 是普通目录的 host 步骤或 command 步骤，`validate`、`doctor` 和 `run` 都会直接报错；command 显式设 `input: "none"` 时除外。
-- 不依赖代码的环境检查可以用 `{ "id": "env", "agent": "command", "input": "none", "cwd": ".", "host": "box", "command": ["uname", "-a"] }`。`cwd` 仍是本机已有目录，用来归类 run；实际在执行机器的新空目录里运行，结束后清理。不写 `host` 就在本机运行。此模式不复制文件、不支持 `workspace` 和 `artifacts`；结果记录 `input: "none"`，commit/tree/HEAD 为 `null`，另附 argv 摘要、执行机器、退出码和日志证据。空目录不是权限沙箱。使用前一起升级 driver 和主机（远程协议 4）；这类 run 使用记录版本 5。
+- 不依赖代码的环境检查可以用 `{ "id": "env", "agent": "command", "input": "none", "cwd": ".", "host": "box", "command": ["uname", "-a"] }`。`cwd` 仍是本机已有目录，用来归类 run；实际在执行机器的新空目录里运行，结束后清理。不写 `host` 就在本机运行。此模式不复制文件、不支持 `workspace` 和 `artifacts`；结果记录 `input: "none"`，commit/tree/HEAD 为 `null`，另附 argv 摘要、执行机器、退出码和日志证据。空目录不是权限沙箱。这类 run 使用记录版本 5。远程协议保持 3：旧主机仍能执行原有 Git 快照任务；新能力会在派发前检查，缺失时提示升级。
 - `doctor workflow.json` 在本机或目标主机查找命令文件，不执行命令，也不要求安装或登录“command CLI”。依赖 workspace 的命令和远端快照里的相对路径命令会明确标为等待对应目录生成后检查。
 - 远端拿到的是文件的冻结副本：已跟踪和未跟踪、未被忽略的文件，包括未提交的修改。被忽略的文件不发送；不支持 submodule 和 Git LFS。你仓库的 HEAD、index 和对象库都不会被写入，也不会推到 `origin`。
 - 只有每核负载低于 `--max-load`（默认 0.8）、剩余磁盘高于 `--min-free-gb`（默认 5）时才会用这台机器。`--slots`（默认 2）限制那台机器上同时跑几个步骤，所有往这台机器派任务的人共用。
@@ -187,6 +187,9 @@ sflow hosts check                     # sflow 版本、工具、负载、剩余�
 - 一行加测试关卡：`sflow init implement-review-fix --task "…" --write --test "bun test" --host implement=box --host review=mini --host test=mini` 会在实现后和每轮修复后跑测试，每轮审查都会读测试结果。测试失败会作为结果交给审查（`allowFailure`），由审查要求修复。
 - 模板里也能写 `host` 和 command 步骤；`sflow start --host <步骤>=<主机>[,<主机>…]` 可以为这一次 run 改某个步骤的主机。
 - `sflow hosts gc [--days 7]` 清理主机上已结束的 command 任务。
+
+统一升级先看计划：`sflow upgrade --hosts --check`，再执行 `sflow upgrade --hosts`。本机安装核验成功后，由新版本把配置的主机升级到同一个确切版本，不会各自取 latest。只对齐指定主机用 `sflow hosts upgrade box mini --check` / `sflow hosts upgrade box mini`，目标是当前 driver 的版本。未结束的 run、团队会话和已占用槽位会阻止对应机器的替换；更新器不会停止 worker。部分失败会逐台列出并返回非零，先检查再明确重试；升级期间不要同时派发新任务。安装会校验 SHA-256 并原子替换二进制。旧版本没有这些参数时，先执行一次 `sflow upgrade` 获取新命令。
+
 
 GUI 操作、截图、用你钥匙串签名，以及任何用到本机屏幕或浏览器 profile 的事，都不能给 host。host 步骤也碰不到远端的桌面：它是 SSH 上的终端会话，没有那台机器的录屏和 GUI 权限。
 

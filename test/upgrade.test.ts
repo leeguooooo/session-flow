@@ -46,7 +46,11 @@ test("the release page redirect names the latest version without the API, which 
 
 test("upgrade runs the installer only when a newer release exists", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sf-upgrade-")), marker = join(dir, "ran");
-  const installer = join(dir, "install.sh"); writeFileSync(installer, `echo ran > ${marker}\n`);
+  const installer = join(dir, "install.sh"); writeFileSync(installer, `echo ran > ${marker}
+mkdir -p "$HOME/.local/bin"
+printf '#!/bin/sh\\necho %s\\n' "$SFLOW_VERSION" > "$HOME/.local/bin/sflow"
+chmod 755 "$HOME/.local/bin/sflow"
+`);
   const env = { SFLOW_UPGRADE_LATEST_URL: url, SFLOW_UPGRADE_INSTALLER: installer, HOME: dir };
   try {
     tag = "v0.1.6"; status = 200;
@@ -101,4 +105,40 @@ test("daily notice goes to stderr from the cache and stays quiet where it should
     } finally { process.stderr.write = write; }
     expect(lines).toEqual(["sflow 0.3.0 is available (you have 0.1.6). Upgrade: sflow upgrade\n"]);
   } finally { rmSync(cache, { recursive: true, force: true }); }
+});
+
+test("local upgrade blockers preserve unresolved jobs and team sessions", () => {
+  const { localUpgradeBlockers } = require("../src/upgrade") as typeof import("../src/upgrade");
+  const dir = mkdtempSync(join(tmpdir(), "sf-upgrade-state-"));
+  try {
+    for (const path of ["runs/a", "teams/t"]) mkdirSync(join(dir, path), { recursive: true });
+    writeFileSync(join(dir, "runs/a/run.json"), JSON.stringify({ status: "blocked", steps: {} }));
+    writeFileSync(join(dir, "teams/t/team.json"), JSON.stringify({ members: { rev: { status: "uncertain" } } }));
+    expect(localUpgradeBlockers({ SFLOW_HOME: dir })).toEqual(["run a (blocked)", "team t"]);
+    writeFileSync(join(dir, "runs/a/run.json"), JSON.stringify({ status: "done", steps: {} }));
+    writeFileSync(join(dir, "teams/t/team.json"), JSON.stringify({ members: { rev: { status: "closed" } } }));
+    expect(localUpgradeBlockers({ SFLOW_HOME: dir })).toEqual([]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("coordinated upgrade delegates hosts to the verified new binary and reports partial failure", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sf-upgrade-handoff-")), marker = join(dir, "called");
+  const installer = join(dir, "install.sh");
+  try {
+    const env = { SFLOW_UPGRADE_LATEST_URL: url, SFLOW_UPGRADE_INSTALLER: installer, HOME: dir, PATH: process.env.PATH };
+    tag = "v0.8.0"; status = 200;
+    writeFileSync(installer, `mkdir -p "$HOME/.local/bin"
+cat > "$HOME/.local/bin/sflow" <<'SH'
+#!/bin/sh
+case "$1" in version) echo 0.8.0;; hosts) echo "$*" > '${marker}'; exit 2;; esac
+SH
+chmod 755 "$HOME/.local/bin/sflow"
+`);
+    expect(await upgrade("0.7.1", "install", env, true)).toBe(2);
+    expect(readFileSync(marker, "utf8").trim()).toBe("hosts upgrade");
+    rmSync(marker);
+    writeFileSync(installer, "exit 1\n");
+    expect(await upgrade("0.7.1", "install", env, true)).toBe(2);
+    expect(existsSync(marker)).toBe(false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

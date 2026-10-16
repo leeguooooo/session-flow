@@ -1,15 +1,15 @@
 // use-family upgrade convention (leeguooooo/plugins docs/upgrade.md): `sflow upgrade`,
 // a daily "new version" notice on stderr, and refreshing every copy of the skill.
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { upgradeHosts, hostUpdateFailed, renderHostUpdates } from "./host-upgrade";
 import { skillPaths } from "./skill";
 
 export const REPO = "leeguooooo/session-flow";
 export const PLUGIN_ID = "sflow@leeguooooo-plugins";
 export const UPDATE_CHECK_COMMAND = "_update-check";
-const INSTALL_URL = `https://raw.githubusercontent.com/${REPO}/main/install.sh`;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 type Version = [number, number, number];
@@ -103,22 +103,72 @@ export function refreshSkills(copies: SkillCopy[]): string[] {
   });
 }
 
-export async function upgrade(current: string, mode: "install" | "check" | "json", env: NodeJS.ProcessEnv = process.env): Promise<number> {
+// These are conservative record checks, not proof that a process has completed.
+// Pending/uncertain records require an explicit user decision before replacing the helper.
+export function localUpgradeBlockers(env: NodeJS.ProcessEnv): string[] {
+  const home = env.SFLOW_HOME ?? join(env.HOME || homedir(), ".local/state/session-flow"), busy: string[] = [];
+  for (const [kind, file] of [["runs", "run.json"], ["teams", "team.json"]]) {
+    const dir = join(home, kind);
+    if (!existsSync(dir)) continue;
+    for (const id of readdirSync(dir)) {
+      if (!existsSync(join(dir, id, file))) continue;
+      try {
+        const record = JSON.parse(readFileSync(join(dir, id, file), "utf8"));
+        if (kind === "runs") {
+          if (!record.steps || typeof record.steps !== "object") throw new Error("invalid run record");
+          let driverLive = false;
+          try { const pid = Number(readFileSync(join(dir, id, "driver.lock"), "utf8")); if (Number.isSafeInteger(pid) && pid > 1) { process.kill(pid, 0); driverLive = true; } }
+          catch (e) { driverLive = (e as NodeJS.ErrnoException).code === "EPERM"; }
+          if (driverLive || !["done", "cancelled"].includes(record.status) || Object.values(record.steps ?? {}).some((s: any) => ["active", "retained"].includes(s.lifecycle))) busy.push(`run ${id} (${record.status})`);
+        } else {
+          if (!record.members || typeof record.members !== "object") throw new Error("invalid team record");
+          if (Object.values(record.members).some((m: any) => m.status !== "closed")) busy.push(`team ${id}`);
+        }
+      } catch { busy.push(`unreadable ${kind}/${id}`); }
+    }
+  }
+  return busy;
+}
+export async function upgrade(current: string, mode: "install" | "check" | "json", env: NodeJS.ProcessEnv = process.env, withHosts = false): Promise<number> {
   const latest = await fetchLatest(env);
   const skills = detectSkills(env, env.HOME || homedir());
+  const target = "version" in latest && newer(latest.version, current) ? latest.version : current;
+  const localBusy = newer(target, current) ? localUpgradeBlockers(env) : [];
+  const hosts = withHosts && mode !== "install" && "version" in latest ? await upgradeHosts(target, [], false) : undefined;
   if (mode === "json") {
     console.log(JSON.stringify({ name: "sflow", current, latest: "version" in latest ? latest.version : null,
-      update_available: "version" in latest && newer(latest.version, current), skills, ...("error" in latest ? { error: latest.error } : {}) }, null, 2));
-    return "error" in latest ? 2 : 0;
+      update_available: "version" in latest && newer(latest.version, current), skills,
+      ...(withHosts ? { target, localBusy, hosts } : {}), ...("error" in latest ? { error: latest.error } : {}) }, null, 2));
+    return "error" in latest || localBusy.length || (hosts && hostUpdateFailed(hosts)) ? 2 : 0;
   }
   if ("error" in latest) { console.error(`sflow: could not check the latest release: ${latest.error}`); return 2; }
-  if (!newer(latest.version, current)) { console.log(`sflow ${current} is up to date`); return 0; }
-  if (mode === "check") { console.log(`sflow ${current} -> ${latest.version}`); return 0; }
-  const argv = env.SFLOW_UPGRADE_INSTALLER ? ["sh", env.SFLOW_UPGRADE_INSTALLER] : ["sh", "-c", `curl -fsSL ${INSTALL_URL} | sh`];
-  const run = spawnSync(argv[0], argv.slice(1), { stdio: "inherit", env });
+  if (mode === "check") {
+    console.log(newer(target, current) ? `sflow ${current} -> ${target}` : `sflow ${current} is up to date`);
+    if (localBusy.length) console.log(`local upgrade blocked: ${localBusy.join("; ")}; finish or explicitly stop them first`);
+    if (hosts) console.log(renderHostUpdates(hosts).join("\n"));
+    return localBusy.length || (hosts && hostUpdateFailed(hosts)) ? 2 : 0;
+  }
+  if (!newer(target, current)) {
+    console.log(`sflow ${current} is up to date`);
+    if (!withHosts) return 0;
+    const rows = await upgradeHosts(current, [], true);
+    console.log(renderHostUpdates(rows).join("\n")); return hostUpdateFailed(rows) ? 2 : 0;
+  }
+  if (localBusy.length) { console.error(`sflow: not upgrading while these records remain unresolved: ${localBusy.join("; ")}; finish or explicitly stop them first`); return 2; }
+  const argv = env.SFLOW_UPGRADE_INSTALLER ? ["sh", env.SFLOW_UPGRADE_INSTALLER] : ["sh", "-c", `curl -fsSL https://raw.githubusercontent.com/${REPO}/v${target}/install.sh | sh`];
+  const run = spawnSync(argv[0], argv.slice(1), { stdio: "inherit", env: { ...env, SFLOW_VERSION: target } });
   if (run.status !== 0) { console.error(`sflow: installer failed (${argv.join(" ")})`); return 2; }
+  const installed = join(env.SFLOW_INSTALL_DIR || join(env.HOME || homedir(), ".local/bin"), "sflow");
+  const version = spawnSync(installed, ["version"], { encoding: "utf8", env });
+  if (version.status !== 0 || version.stdout.trim() !== target) { console.error(`sflow: installed binary did not verify as ${target}; remote hosts were not changed`); return 2; }
   for (const line of refreshSkills(skills)) console.log(line);
-  console.log(`sflow ${current} -> ${latest.version}`);
+  console.log(`sflow ${current} -> ${target}`);
+  if (withHosts) {
+    // The NEW executable owns host orchestration, so future protocols/configuration
+    // are never interpreted by the old driver. Each host uses this exact version.
+    const aligned = spawnSync(installed, ["hosts", "upgrade"], { stdio: "inherit", env });
+    if (aligned.status !== 0) { console.error("sflow: local upgrade succeeded; host alignment is incomplete. Inspect: sflow hosts upgrade --check"); return 2; }
+  }
   return 0;
 }
 

@@ -100,11 +100,11 @@ sflow task                          worker: read assignment and report acceptanc
 sflow report --file <result.json>    worker: report done/blocked/failed
 sflow report done '<summary>' [--check …] [--artifact …] [--detail k=v]  worker: report (or failed/blocked)
 sflow report --json '<JSON>'         worker: report without writing a file
-sflow hosts list|add|remove|check|install  machines steps can run on over ssh (see sflow hosts)
+sflow hosts list|add|remove|check|install|upgrade  machines steps can run on over ssh (see sflow hosts)
 sflow team spawn|ls|send|logs|attach|stop|gc  long-lived role sessions coordinated by message (see sflow team)
 sflow remote <op>                    host side of a step on this machine (called over ssh)
 sflow skill install                 install the sflow skill for Claude Code, Codex, Pi and agy
-sflow upgrade [--check|--json]       install the latest release and refresh the skill
+sflow upgrade [--hosts] [--check|--json]       install the latest release and refresh the skill
 sflow version
 
 Claude/Codex authenticate through their own CLIs. No orcr or Herdr required.
@@ -121,9 +121,9 @@ leaves workers running, and allows resume. Keep run IDs for recovery.`); return;
   if (cmd === "team") { process.exitCode = await teamCommand(args.slice(1), cli); return; }
   if (cmd === UPDATE_CHECK_COMMAND) { await runUpdateCheck(); return; }
   if (cmd === "upgrade") {
-    const flags = args.slice(1);
-    if (flags.length > 1 || (flags[0] && !["--check", "--json"].includes(flags[0]))) throw new Error("upgrade [--check|--json]");
-    process.exitCode = await upgrade(pkg.version, flags[0] === "--check" ? "check" : flags[0] === "--json" ? "json" : "install"); return;
+    const flags = args.slice(1), withHosts = flags.includes("--hosts");
+    if (new Set(flags).size !== flags.length || flags.some(f => !["--check", "--json", "--hosts"].includes(f)) || (flags.includes("--check") && flags.includes("--json"))) throw new Error("upgrade [--hosts] [--check|--json]");
+    process.exitCode = await upgrade(pkg.version, flags.includes("--check") ? "check" : flags.includes("--json") ? "json" : "install", process.env, withHosts); return;
   }
   if (cmd === "skill") {
     if (arg !== "install" || rest.length) throw new Error("skill install");

@@ -118,7 +118,7 @@ export function releaseSlot(owner: string) { return withLock(() => releaseLocked
 
 export function hello(version: string): Hello {
   const tools = Object.fromEntries(["tmux", "ocs", "git", ...AGENTS].map(t => [t, Bun.which(t, { PATH: process.env.PATH })]));
-  return { protocol: REMOTE_PROTOCOL, version, home: dataHome(), arch: process.arch, platform: process.platform,
+  return { protocol: REMOTE_PROTOCOL, capabilities: ["command-input-none", "command-check"], version, home: dataHome(), arch: process.arch, platform: process.platform,
     cpus: cpus().length, load: loadavg()[0], freeGB: freeGB(dataHome()), tools,
     slots: slotOwners().map(({ owner, since }) => ({ owner, since })) };
 }

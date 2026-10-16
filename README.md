@@ -208,7 +208,7 @@ artifacts, no agent involved.
   execution. No files are copied, `workspace` and `artifacts` are unavailable,
   and the receipt records `input: "none"` with null commit/tree/HEAD plus the argv,
   machine, exit and log evidence. This directory does not sandbox the command.
-  Upgrade driver and hosts together (remote protocol 4); these runs use record version 5.
+  These runs use record version 5. Protocol-3 hosts keep existing snapshot support; `input: none` requires the new capability, checked before dispatch.
 - `doctor workflow.json` locates command executables locally or on their target
   hosts without executing them, and does not ask for a “command CLI” or AI login.
   Commands using a dependency workspace or a relative remote snapshot path are
@@ -244,6 +244,19 @@ artifacts, no agent involved.
   failing test is passed to the review (`allowFailure`), which asks for a fix.
 - Templates can carry `host` and command steps too; `sflow start --host <step>=<host>[,<host>…]` overrides one step's host for a run.
 - `sflow hosts gc [--days 7]` deletes finished command jobs on the hosts.
+
+To align versions, inspect with `sflow upgrade --hosts --check`, then apply with
+`sflow upgrade --hosts`. It verifies the local upgrade before updating configured
+hosts to that exact release. `sflow hosts upgrade box mini --check` / `sflow hosts
+upgrade box mini` selects hosts and matches the currently installed driver, without
+upgrading the driver. Busy or uncertain runs/team sessions are left for you to
+finish or stop; no worker is stopped by the updater. A partial failure lists each
+host and returns nonzero; recheck before explicitly resuming. Don't dispatch new
+work concurrently with alignment. Installs verify checksums and atomically replace
+the binary. Existing protocol-3 snapshot workflows remain compatible with older
+hosts; only new capabilities require an upgrade. On versions before this command
+exists, run `sflow upgrade` once first to obtain it.
+
 
 GUI work, screenshots, signing with your keychain, or anything using this
 machine's screen or browser profiles must not get a host. A host step also cannot

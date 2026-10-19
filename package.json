@@ -11,5 +11,5 @@
     "bench:context": "bun scripts/context-benchmark.ts",
     "build": "bun build --compile src/cli.ts --outfile dist/sflow"
   },
-  "devDependencies": { "@types/bun": "latest", "typescript": "^5.9.0" }
+  "devDependencies": { "@types/bun": "latest", "typescript": "^7.0.2" }
 }

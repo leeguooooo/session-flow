@@ -11,7 +11,7 @@ jobs:
       matrix:
         include:
           - os: darwin
-            runner: macos-14
+            runner: macos-15
           - os: linux
             runner: ubuntu-latest
     steps:
